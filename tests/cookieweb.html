@@ -1,0 +1,36 @@
+<!-- Very simple demo website to test cookies.js -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cookie Demo</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <h1>Demo Website</h1>
+    <p>This is a test page for the automatic cookie acceptance extension.</p>
+
+    <div id="cookie-banner">
+        <p>This website uses cookies to ensure you get the best experience on our website.</p>
+        <div class="buttons">
+            <button id="accept-all">Accept All</button>
+            <button id="accept-minimal">Accept Minimal</button>
+            <button id="reject-all">Reject All</button>
+        </div>
+    </div>
+
+    <script>
+      document.addEventListener('DOMContentLoaded', () => {
+          const banner = document.getElementById('cookie-banner');
+          const buttons = document.querySelectorAll('.buttons button');
+
+          buttons.forEach(button => {
+              button.addEventListener('click', () => {
+                  banner.style.display = 'none';
+              });
+          });
+      });
+    </script>
+</body>
+</html>

@@ -1,4 +1,16 @@
 
+// also see content/cookies.js
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.message === "minimal_cookies_accepted") {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icon.png",
+      title: "Cookie Notice",
+      message: "Minimal cookies have been automatically accepted."
+    });
+  }
+});
+
 function tabsel(tab, count) {
   chrome.tabs.query({windowId: tab.windowId}, tabs => {
     const index = Util.mod(count + tab.index, tabs.length);
