@@ -2,14 +2,19 @@
 // Reduces time spent on annoying regulations.
 //
 
-/**
- * @typedef {'id'|'class'|'attribute'|'text'} SelectorType
- */
 
-/**
- * @type {{selector: string, type: SelectorType, text?: string[]}}
- */
-const selectors = [
+// ==CONFIGURATION==
+const MAX_SEARCH_SECONDS = 5; // Max time in seconds to search
+const MAX_TRAVERSAL_DEPTH = 10; // Max shadow DOM nesting depth
+const DEBOUNCE_DELAY_MS = 500; // Wait this long after last DOM change to search
+// ==/CONFIGURATION==
+
+// --- State and Selectors ---
+let timedOut = false;
+let searchTimeoutId = null;
+let debounceTimeoutId = null;
+let observer = null;
+const selectors = [  // @type {{selector: string, type: SelectorType, text?: string[]}}
   // --- High-Confidence: Specific IDs ---
   { type: 'id', selector: '#CybotCookiebotDialogBodyLevelButtonLevelOptinDecline' },
   { type: 'id', selector: '#cookie-pro-reject-btn' },
@@ -44,98 +49,130 @@ const selectors = [
   }
 ];
 
-// Gemini added this for the shadow dom traversal
-selectors.concat([
-  // --- High-Confidence: Specific IDs ---
-  { type: 'id', selector: '#CybotCookiebotDialogBodyLevelButtonLevelOptinDecline' },
-  { type: 'id', selector: '#cookie-pro-reject-btn' },
-  { type: 'id', selector: '#onetrust-reject-all-handler' },
-
-  // --- High-Confidence: Data Attributes ---
-  { type: 'attribute', selector: '[data-testid="cookie-policy-manage-dialog-decline-button"]' },
-  { type: 'attribute', selector: '[data-cc-action="deny"]' },
-  
-  // --- Medium-Confidence: Common Class Names ---
-  { type: 'class', selector: '.cc-btn.cc-deny' },
-  { type: 'class', selector: '.cookie-decline-button' },
-
-  // --- Low-Confidence: Text Content (last resort) ---
-  {
-    type: 'text',
-    selector: 'button, a',
-    text: ['reject all', 'decline', 'necessary only', 'accept only essential']
-  }
-]);
-
-/**
- * Checks if an element is visible and interactable.
- * @param {HTMLElement} el 
- * @returns {boolean}
+/** Checks if an element is visible and interactable.
+ * @param {HTMLElement} el
  */
-function isVisible(el) {
+function isVisible(el) {  // -> bool
   return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length) && window.getComputedStyle(el).visibility !== 'hidden';
 }
 
 
 
 /**
- * Recursively searches for the target element within a node and its shadow roots.
- * @param {Document|ShadowRoot} node 
- * @returns {boolean} - True if an element was found and clicked, otherwise false.
+ * Recursively searches for the target element with guardrails.
+ * @param {Document|ShadowRoot} node
+ * @param {number} depth - The current traversal depth.
+ * @returns {boolean} - True if an element was found and clicked.
  */
-function findInNode(node) {
+function findInNode(node, depth) {
+    if (timedOut || depth > MAX_TRAVERSAL_DEPTH) {
+        return false;
+    }
+
+    for (const item of selectors) {
+        try {
+            const elements = node.querySelectorAll(item.selector);
+            for (const el of elements) {
+                if (timedOut) return true; // Exit if timeout occurred during loop
+                let found = false;
+                if (item.type === 'text') {
+                    if (item.text.some(t => el.textContent.toLowerCase().includes(t)) && isVisible(el)) {
+                        found = true;
+                    }
+                } else if (isVisible(el)) {
+                    found = true;
+                }
+                if (found) {
+                    clickElement(el);
+                    return true;
+                }
+            }
+        } catch (e) { /* Ignore errors */ }
+    }
+
+    // Search deeper in shadow roots
+    const allElements = node.querySelectorAll('*');
+    for (const el of allElements) {
+        if (el.shadowRoot) {
+            if (findInNode(el.shadowRoot, depth + 1)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * Recursively searches for the target element with guardrails.
+ * @param {Document|ShadowRoot} node
+ * @param {number} depth - The current traversal depth.
+ * @returns {boolean} - True if an element was found and clicked.
+ */
+function findInNode(node, depth) {
+  if (timedOut || depth > MAX_TRAVERSAL_DEPTH) return false;
   for (const item of selectors) {
     try {
-      const elements = Array.from(node.querySelectorAll(item.selector));
-      if (!elements.length) continue;
-
+      const elements = node.querySelectorAll(item.selector);
       for (const el of elements) {
+        if (timedOut) return true; // Exit if timeout occurred during loop
         let found = false;
         if (item.type === 'text') {
-          const elText = el.textContent.toLowerCase().trim();
-          if (item.text.some(t => elText.includes(t)) && isVisible(el)) {
+          if (item.text.some(t => el.textContent.toLowerCase().includes(t)) && isVisible(el)) {
             found = true;
           }
-        } else { // For id, class, attribute
-          if (isVisible(el)) {
-            found = true;
-          }
+        } else if (isVisible(el)) {
+          found = true;
         }
         if (found) {
           clickElement(el);
-          return true; // Found and clicked, stop all searching.
+          return true;
         }
       }
-    } catch (error) {
-      // Ignore errors from invalid selectors in shadow DOMs that don't support them
-    }
+    } catch (e) { /* Ignore errors */ }
   }
 
-  // If not found, search deeper in shadow roots within the current node
+  // Search deeper in shadow roots
   const allElements = node.querySelectorAll('*');
   for (const el of allElements) {
     if (el.shadowRoot) {
-      if (findInNode(el.shadowRoot)) {
-        return true; // Element found in a nested shadow root, stop.
+      if (findInNode(el.shadowRoot, depth + 1)) {
+        return true;
       }
     }
   }
-  return false; // Not found in this node or any of its children
+  return false;
+}
+
+/**
+ * A debounced function to trigger the search.
+ */
+function debouncedSearch() {
+    clearTimeout(debounceTimeoutId);
+    if (timedOut) return;
+    debounceTimeoutId = setTimeout(() => findInNode(document, 0), DEBOUNCE_DELAY_MS);
 }
 
 /**
  * Clicks an element and sends a runtime message.
- * @param {HTMLElement} el 
+ * Disconnects observer.
+ * @param {HTMLElement} el
  */
 function clickElement(el) {
-  el.click();
-  console.log('(tk)', el);
-  Util.toast(`Minimal Cookies: Clicked element with text "${el.textContent.trim()}"`);
-  chrome.runtime.sendMessage({ message: "minimal_cookies_accepted" });
+    el.click();
+    console.log("(tk.cookies) click", el);
+    // Use Util.toast if available, fallback to console
+    if (typeof Util !== 'undefined' && Util.toast) {
+        Util.toast(`click: "${el.textContent.trim()}"`);
+    } else {
+        console.log(`[cookies] clicked: "${el.textContent.trim()}"`);
+    }
+    if (observer) observer.disconnect();
+    if (searchTimeoutId) clearTimeout(searchTimeoutId);
+    timedOut = true; // Prevent any lingering searches
 }
 
 
-setTimeout(() => findInNode(document.body)), 1500);
+//setTimeout(() => findInNode(document.body)), 1500);
 
 // OLD
 // setTimeout(() => {

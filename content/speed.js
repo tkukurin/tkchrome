@@ -19,6 +19,26 @@
 
 console.log("Video speed plugin loaded.");
 
+function isElementVisible(el) {
+  if (!el) return false;
+  const style = window.getComputedStyle(el);
+  const isDisplayed = style.display !== 'none';
+  const isVisible = style.visibility !== 'hidden' && style.visibility !== 'collapse';
+  const isOpaque = parseFloat(style.opacity) !== 0;
+  const hasSize = el.offsetWidth > 0 && el.offsetHeight > 0;
+  const rect = el.getBoundingClientRect();
+  const inViewport = (
+    rect.width > 0 &&
+    rect.height > 0 &&
+    rect.bottom >= 0 &&
+    rect.right >= 0 &&
+    rect.top <= (window.innerHeight || document.documentElement.clientHeight) &&
+    rect.left <= (window.innerWidth || document.documentElement.clientWidth)
+  );
+
+  return isDisplayed && isVisible && isOpaque && hasSize && inViewport;
+}
+
 const shadowCss = (top, left, opacity) => `
   *{font: 13px/1.8em sans-serif}
   :host(:hover) #controls {display: inline}

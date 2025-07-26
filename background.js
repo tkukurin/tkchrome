@@ -1,4 +1,14 @@
 
+// Service worker for manifest v3
+// Import utilities - note: importScripts needed for service worker
+try {
+  importScripts('util/sw-include.js');
+} catch (e) {
+  console.warn('Could not import service worker utilities:', e);
+  // Fallback utilities
+  const Util = { mod: (x, len) => (x + len) % len };
+}
+
 // also see content/cookies.js
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.message === "minimal_cookies_accepted") {
@@ -137,13 +147,23 @@ function saveToIndexedDB(url, details) {
 }
 
 
-chrome.runtime.onInstalled.addListener(function () {
-  chrome.webRequest.onBeforeRequest.addListener(
-    function (details) {
-      saveToIndexedDB(details.url, details);
-    },
-    //{ urls: ["<all_urls>"] },
-    { urls: ["https://statquest.org/statquest-store/"] },
-    ["blocking"]
-  );
+// Service worker startup - register listeners on install
+chrome.runtime.onInstalled.addListener(() => {
+  console.log('Extension installed/updated');
+  
+  // Set up web request listeners if needed
+  if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
+    chrome.webRequest.onBeforeRequest.addListener(
+      (details) => {
+        saveToIndexedDB(details.url, details);
+      },
+      { urls: ["https://statquest.org/statquest-store/"] },
+      ["requestBody"] // Note: "blocking" not needed for data collection
+    );
+  }
+});
+
+// Handle extension startup
+chrome.runtime.onStartup.addListener(() => {
+  console.log('Extension startup');
 });

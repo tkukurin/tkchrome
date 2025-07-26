@@ -2,7 +2,7 @@
   "name": "TamperScripts",
   "description": "Various chrome extensions in one.",
   "version": "1.0",
-  "manifest_version": 2,
+  "manifest_version": 3,
   "permissions": [
     "tabs",
     "history",
@@ -10,24 +10,19 @@
     "storage",
     "sessions",
     "downloads",
-    "topSites",
-    "downloads.shelf",
     "clipboardRead",
     "clipboardWrite",
     "management",
-    "tabs",
     "webRequest",
-    "webRequestBlocking",
-    "webNavigation",
+    "webNavigation"
+  ],
+  "host_permissions": [
     "http://*/*",
     "https://*/*"
   ],
   "background": {
-    "persistent": true,
-    "scripts": [
-      "background.js",
-      "util/include.js"
-    ]
+    "service_worker": "background.js",
+    "type": "module"
   },
   "content_scripts": [
     {
