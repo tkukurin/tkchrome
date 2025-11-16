@@ -123,7 +123,14 @@ async function cpImportantInfo() {
     const sel = '#body #segments-container yt-formatted-string.segment-text'
     const allTranscripts = Array.from(document.querySelectorAll(sel))
       .map(x => x.parentNode.innerText)
-    return allTranscripts
+    const seen = new Set()
+    const deduplicated = allTranscripts.filter(x => {
+      const normalized = x.trim().replace(/\s+/g, ' ')
+      if (seen.has(normalized)) return false
+      seen.add(normalized)
+      return true
+    })
+    return deduplicated
   }).then(allTranscripts => {
     const url = getUrl()
     const title = document.querySelector('#title h1').innerText.trim()
@@ -232,4 +239,3 @@ window.onkeyup = document.onkeyup = Shortcut.init({
   ],
   m: [Shortcut.sel('b', '.ytp-fullscreen-button.ytp-button'),]
 });
-
