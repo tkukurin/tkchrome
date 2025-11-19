@@ -134,7 +134,7 @@ async function cpImportantInfo() {
   }).then(allTranscripts => {
     const url = getUrl()
     const title = document.querySelector('#title h1').innerText.trim()
-    const base = `title: "${title}"\nsource: ${url}\n\n`
+    const base = `---\ntitle: "${title}"\nsource: ${url}\n--\n\n`
     const presentation = allTranscripts.join('\n')
     navigator.clipboard.writeText(`${base}## Transcript\n\n${presentation}`)
     Util.toast('C/p captions!')
