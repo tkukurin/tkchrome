@@ -1,8 +1,27 @@
 /**
- * Quick and dirty plugin to copy captions from a YT video.
+ * YT Ad Skip - Analyzes transcripts via Gemini to skip ads/filler.
+ *
+ * SETUP:
+ *   chrome://extensions → TamperScripts → service worker console:
+ *   chrome.storage.local.set({GOOGLE_API_KEY: 'your-key'})
+ *
+ * USAGE:
+ *   alt+g  analyze & skip    alt+p  toggle panel    alt+o  load transcript
+ *
+ * HOW IT WORKS:
+ *   1. Fetches transcript (DOM or YT timedtext API fallback)
+ *   2. Sends to Gemini to identify useless sections
+ *   3. Caches in localStorage, auto-skips on revisit
+ *
+ * CONSOLE:
+ *   ytAdSkipCache.list()         // all cached videos
+ *   ytAdSkipCache.get('ID')      // full data (transcript, useless)
+ *   ytAdSkipCache.clear('ID')    // clear specific / all
+ *   ytAdSkipCache.reanalyze()    // re-analyze current video
+ *   JSON.parse(localStorage.getItem('yt_adskip_history'))  // raw
  */
 
-console.log("Caption plugin loaded");
+console.log("YT Ad Skip loaded");
 
 const getVideo = () => document.querySelector('video');
 
@@ -19,31 +38,72 @@ function getUrl(timeStr) {
 }
 
 // --- Ad Skip State Management ---
+// Cache stored in localStorage for easy console access
+//
+// Access from console:
+//   JSON.parse(localStorage.getItem('yt_adskip_history'))  // all history
+//   ytAdSkipCache.get('VIDEO_ID')                          // specific video
+//   ytAdSkipCache.list()                                   // list all video IDs
+//   ytAdSkipCache.clear()                                  // clear all
+//   ytAdSkipCache.clear('VIDEO_ID')                        // clear specific
+//
+const CACHE_STORAGE_KEY = 'yt_adskip_history';
+
 const AdSkipManager = {
   currentVideoId: null,
   currentInterval: null,
-  STORAGE_KEY: 'yt_useless_cache',
 
-  async getCache() {
-    const data = await chrome.storage.local.get(this.STORAGE_KEY);
-    return data[this.STORAGE_KEY] || {};
+  getCache() {
+    try {
+      return JSON.parse(localStorage.getItem(CACHE_STORAGE_KEY)) || {};
+    } catch {
+      return {};
+    }
   },
 
-  async setCache(videoId, useless) {
-    const cache = await this.getCache();
-    cache[videoId] = useless;
-    await chrome.storage.local.set({ [this.STORAGE_KEY]: cache });
+  setCache(videoId, data) {
+    const cache = this.getCache();
+    cache[videoId] = {
+      ...data,
+      videoId,
+      timestamp: new Date().toISOString(),
+      url: window.location.href
+    };
+    localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(cache));
+    console.log('[YT-AdSkip] Cached data for', videoId);
   },
 
-  async getCached(videoId) {
-    const cache = await this.getCache();
+  getCached(videoId) {
+    const cache = this.getCache();
     return cache[videoId] || null;
+  },
+
+  clearCache(videoId) {
+    if (videoId) {
+      const cache = this.getCache();
+      delete cache[videoId];
+      localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(cache));
+      console.log('[YT-AdSkip] Cleared cache for', videoId);
+    } else {
+      localStorage.removeItem(CACHE_STORAGE_KEY);
+      console.log('[YT-AdSkip] Cleared all cache');
+    }
+  },
+
+  listCached() {
+    const cache = this.getCache();
+    return Object.keys(cache).map(id => ({
+      videoId: id,
+      title: cache[id].title,
+      sections: cache[id].useless?.length || 0,
+      timestamp: cache[id].timestamp
+    }));
   },
 
   cleanup() {
     if (this.currentInterval) {
       clearInterval(this.currentInterval);
-      console.log(`Cleared ad skip interval for video: ${this.currentVideoId}`);
+      console.log('[YT-AdSkip] Cleared interval for video:', this.currentVideoId);
       this.currentInterval = null;
     }
     this.currentVideoId = null;
@@ -55,6 +115,299 @@ const AdSkipManager = {
     this.currentInterval = intervalId;
   }
 };
+
+// Expose cache helpers to window for console access
+window.ytAdSkipCache = {
+  get: (videoId) => AdSkipManager.getCached(videoId),
+  list: () => { console.table(AdSkipManager.listCached()); return AdSkipManager.listCached(); },
+  clear: (videoId) => AdSkipManager.clearCache(videoId),
+  getAll: () => AdSkipManager.getCache(),
+  // Re-analyze (keeps transcript, just re-runs Gemini)
+  reanalyze: async () => {
+    const videoId = getVideoId();
+    if (!videoId) { console.log('[YT-AdSkip] Not on a video page'); return; }
+    AdSkipManager.cleanup();
+    await window.analyzeAndSkip(true); // force flag
+  }
+};
+
+// --- Draggable Panel UI ---
+const SkipPanel = {
+  panel: null,
+
+  create() {
+    if (this.panel) return this.panel;
+    if (!document.body) return null; // Not ready yet
+
+    const panel = document.createElement('div');
+    panel.id = 'yt-adskip-panel';
+    panel.innerHTML = `
+      <div class="adskip-header">
+        <span class="adskip-title">⏭️ Ad Skip</span>
+        <div class="adskip-controls">
+          <button class="adskip-btn adskip-add" title="Add skip">+</button>
+          <button class="adskip-btn adskip-minimize">_</button>
+          <button class="adskip-btn adskip-close">✕</button>
+        </div>
+      </div>
+      <div class="adskip-body">
+        <table class="adskip-table">
+          <thead><tr><th>Start</th><th>End</th><th>Reason</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="adskip-footer">
+          <button class="adskip-btn adskip-reanalyze">🔄 Re-analyze</button>
+          <button class="adskip-btn adskip-clear">🗑️ Clear</button>
+        </div>
+      </div>
+    `;
+
+    const style = document.createElement('style');
+    style.textContent = `
+      #yt-adskip-panel {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        width: 400px;
+        max-height: 300px;
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 8px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        font-size: 13px;
+        color: #e0e0e0;
+        z-index: 99999;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        overflow: hidden;
+      }
+      #yt-adskip-panel.minimized .adskip-body { display: none; }
+      #yt-adskip-panel.minimized { max-height: none; }
+      .adskip-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 12px;
+        background: #252525;
+        cursor: move;
+        user-select: none;
+        border-bottom: 1px solid #333;
+      }
+      .adskip-title { font-weight: 600; }
+      .adskip-controls { display: flex; gap: 4px; }
+      .adskip-btn {
+        background: #333;
+        border: none;
+        color: #e0e0e0;
+        padding: 4px 8px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .adskip-btn:hover { background: #444; }
+      .adskip-body {
+        max-height: 240px;
+        overflow-y: auto;
+        padding: 8px;
+      }
+      .adskip-table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      .adskip-table th, .adskip-table td {
+        padding: 6px 8px;
+        text-align: left;
+        border-bottom: 1px solid #333;
+      }
+      .adskip-table th {
+        background: #252525;
+        font-weight: 600;
+        position: sticky;
+        top: 0;
+      }
+      .adskip-table tr:hover { background: #252525; }
+      .adskip-table .skip-btn, .adskip-table .rm-btn {
+        padding: 2px 6px;
+        font-size: 11px;
+      }
+      .adskip-table .skip-btn { background: #3a6a9a; }
+      .adskip-table .skip-btn:hover { background: #4a7aaa; }
+      .adskip-table .rm-btn { background: #8a3a3a; }
+      .adskip-table .rm-btn:hover { background: #a54545; }
+      .adskip-add { font-weight: bold; }
+      .adskip-footer {
+        display: flex;
+        gap: 8px;
+        padding: 8px 0 4px;
+        border-top: 1px solid #333;
+        margin-top: 8px;
+      }
+      .adskip-empty {
+        text-align: center;
+        padding: 20px;
+        color: #888;
+      }
+    `;
+
+    document.head.appendChild(style);
+    document.body.appendChild(panel);
+    this.panel = panel;
+
+    // Event listeners
+    panel.querySelector('.adskip-close').onclick = () => this.hide();
+    panel.querySelector('.adskip-minimize').onclick = () => panel.classList.toggle('minimized');
+    panel.querySelector('.adskip-reanalyze').onclick = () => ytAdSkipCache.reanalyze();
+    panel.querySelector('.adskip-add').onclick = () => this.promptAdd();
+    panel.querySelector('.adskip-clear').onclick = () => {
+      const videoId = getVideoId();
+      if (videoId) {
+        ytAdSkipCache.clear(videoId);
+        AdSkipManager.cleanup();
+        this.update([]);
+        Util.toast('Cache cleared');
+      }
+    };
+
+    // Dragging
+    this.makeDraggable(panel);
+
+    return panel;
+  },
+
+  makeDraggable(panel) {
+    const header = panel.querySelector('.adskip-header');
+    let isDragging = false, offsetX, offsetY;
+
+    header.onmousedown = (e) => {
+      if (e.target.tagName === 'BUTTON') return;
+      isDragging = true;
+      offsetX = e.clientX - panel.offsetLeft;
+      offsetY = e.clientY - panel.offsetTop;
+      panel.style.transition = 'none';
+    };
+
+    document.onmousemove = (e) => {
+      if (!isDragging) return;
+      panel.style.left = (e.clientX - offsetX) + 'px';
+      panel.style.top = (e.clientY - offsetY) + 'px';
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+    };
+
+    document.onmouseup = () => { isDragging = false; };
+  },
+
+  update(useless, title) {
+    const panel = this.create();
+    if (!panel) return;
+    const tbody = panel.querySelector('tbody');
+
+    if (title) {
+      panel.querySelector('.adskip-title').textContent = `⏭️ ${title.slice(0, 30)}${title.length > 30 ? '...' : ''}`;
+    }
+
+    if (!useless || useless.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="4" class="adskip-empty">No skip sections</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = useless.map((s, i) => `
+      <tr>
+        <td>${s.start}</td>
+        <td>${s.end}</td>
+        <td title="${s.why}">${s.why.slice(0, 20)}${s.why.length > 20 ? '…' : ''}</td>
+        <td>
+          <button class="adskip-btn skip-btn" data-idx="${i}">→</button>
+          <button class="adskip-btn rm-btn" data-idx="${i}">−</button>
+        </td>
+      </tr>
+    `).join('');
+
+    // Skip to section
+    tbody.querySelectorAll('.skip-btn').forEach(btn => {
+      btn.onclick = () => {
+        const section = useless[parseInt(btn.dataset.idx)];
+        const video = document.querySelector('video');
+        if (video && section) {
+          video.currentTime = section.end.split(':').reduce((a, c) => a * 60 + parseInt(c), 0);
+        }
+      };
+    });
+
+    // Remove section
+    tbody.querySelectorAll('.rm-btn').forEach(btn => {
+      btn.onclick = () => this.removeSection(parseInt(btn.dataset.idx));
+    });
+  },
+
+  promptAdd() {
+    const video = document.querySelector('video');
+    const currentTime = video ? this.formatTime(video.currentTime) : '0:00';
+    const start = prompt('Start time:', currentTime);
+    if (!start) return;
+    const end = prompt('End time:', currentTime);
+    if (!end) return;
+    const why = prompt('Reason:', 'Manual skip') || 'Manual skip';
+    this.addSection({ start, end, why });
+  },
+
+  addSection(section) {
+    const videoId = getVideoId();
+    const cached = AdSkipManager.getCached(videoId) || { useless: [], title: '' };
+    cached.useless.push(section);
+    cached.useless.sort((a, b) => this.timeToSecs(a.start) - this.timeToSecs(b.start));
+    AdSkipManager.setCache(videoId, cached);
+    this.update(cached.useless, cached.title);
+    // Restart skipper
+    AdSkipManager.cleanup();
+    AdSkipManager.start(videoId, ytAdSkip(cached.useless));
+  },
+
+  removeSection(idx) {
+    const videoId = getVideoId();
+    const cached = AdSkipManager.getCached(videoId);
+    if (!cached?.useless) return;
+    cached.useless.splice(idx, 1);
+    AdSkipManager.setCache(videoId, cached);
+    this.update(cached.useless, cached.title);
+    // Restart skipper
+    AdSkipManager.cleanup();
+    if (cached.useless.length) AdSkipManager.start(videoId, ytAdSkip(cached.useless));
+  },
+
+  formatTime(secs) {
+    const m = Math.floor(secs / 60), s = Math.floor(secs % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  },
+
+  timeToSecs(t) {
+    return t.split(':').reduce((a, c) => a * 60 + parseInt(c), 0);
+  },
+
+  show(useless, title, minimized = false) {
+    if (!this.create()) return; // DOM not ready
+    this.update(useless, title);
+    this.panel.style.display = 'block';
+    this.panel.classList.toggle('minimized', minimized);
+  },
+
+  hide() {
+    if (this.panel) this.panel.style.display = 'none';
+  },
+
+  toggle() {
+    if (!document.body) return;
+    if (!this.panel || this.panel.style.display === 'none') {
+      const videoId = getVideoId();
+      const cached = AdSkipManager.getCached(videoId);
+      this.show(cached?.useless || [], cached?.title);
+    } else {
+      this.hide();
+    }
+  }
+};
+
+// Expose panel to window
+window.ytSkipPanel = SkipPanel;
 
 // Watch for navigation changes (robust: History API + popstate)
 let lastVideoId = null;
@@ -182,16 +535,21 @@ async function initAdSkipForVideo(videoId) {
   if (!videoId) return;
 
   // Check cache first
-  const cached = await AdSkipManager.getCached(videoId);
-  if (cached) {
-    console.log('Using cached useless data for', videoId);
-    const intervalId = ytAdSkip(cached);
+  const cached = AdSkipManager.getCached(videoId);
+  if (cached && cached.useless?.length) {
+    console.log('[YT-AdSkip] Using cached data for', videoId);
+    console.log('[YT-AdSkip] Title:', cached.title);
+    console.log('[YT-AdSkip] Skipping', cached.useless.length, 'sections:');
+    console.table(cached.useless);
+    const intervalId = ytAdSkip(cached.useless);
     AdSkipManager.start(videoId, intervalId);
+    // Show panel minimized for cached (less intrusive)
+    SkipPanel.show(cached.useless, cached.title, true);
     return;
   }
 
   // No cache - will need transcript analysis
-  console.log('No cached data for', videoId, '- use alt+o to fetch transcript, then alt+g to analyze');
+  console.log('[YT-AdSkip] No cached data for', videoId, '- press alt+g to analyze');
 }
 
 // Store pending results for review
@@ -327,8 +685,8 @@ const TranscriptFetcher = {
   }
 };
 
-// Analyze current transcript with Gemini (stores result for review)
-window.analyzeAndSkip = async () => {
+// Analyze transcript with Gemini. force=true re-runs even if cached.
+window.analyzeAndSkip = async (force = false) => {
   const videoId = getVideoId();
   console.log('[YT-AdSkip] Starting analysis for video:', videoId);
 
@@ -337,40 +695,61 @@ window.analyzeAndSkip = async () => {
     return;
   }
 
-  Util.toast('Fetching transcript...');
-  const transcripts = await TranscriptFetcher.get(videoId);
+  // 1. Check cache first
+  const cached = AdSkipManager.getCached(videoId);
+  let transcript = cached?.transcript;
+  let title = cached?.title;
 
-  if (!transcripts || !transcripts.length) {
-    console.log('[YT-AdSkip] All transcript strategies failed.');
-    console.log('[YT-AdSkip] Try: 1) Open transcript panel (alt+o), 2) Check if video has captions');
-    Util.toast('No transcript found. Try alt+o first or check if video has captions');
+  // 2. If no cached transcript, fetch it
+  if (!transcript) {
+    Util.toast('Fetching transcript...');
+    // Try cache → DOM → API (in TranscriptFetcher)
+    const transcripts = await TranscriptFetcher.get(videoId);
+
+    if (!transcripts?.length) {
+      console.log('[YT-AdSkip] All transcript strategies failed.');
+      Util.toast('No transcript. Try alt+o first');
+      return;
+    }
+
+    console.log('[YT-AdSkip] Fetched', transcripts.length, 'segments');
+    transcript = transcripts.join('\n');
+    title = document.querySelector('#title h1')?.innerText?.trim() || 'Unknown';
+  } else {
+    console.log('[YT-AdSkip] Using cached transcript');
+  }
+
+  // 3. Skip if already analyzed (unless force)
+  if (!force && cached?.useless?.length) {
+    console.log('[YT-AdSkip] Already analyzed, use reanalyze() to re-run');
+    Util.toast('Already analyzed. Use Re-analyze to re-run.');
+    SkipPanel.show(cached.useless, title);
     return;
   }
 
-  console.log('[YT-AdSkip] Found', transcripts.length, 'transcript segments');
-
-  const title = document.querySelector('#title h1')?.innerText?.trim() || 'Unknown';
-  const transcript = transcripts.join('\n');
-  console.log('[YT-AdSkip] Video title:', title);
-  console.log('[YT-AdSkip] Transcript preview:', transcript.slice(0, 500) + '...');
+  console.log('[YT-AdSkip] Title:', title);
+  console.log('[YT-AdSkip] Transcript preview:', transcript.slice(0, 300) + '...');
 
   Util.toast('Analyzing transcript with Gemini...');
   const useless = await analyzeTranscriptWithGemini(transcript, title);
 
   if (useless && useless.length > 0) {
     console.log('[YT-AdSkip] === ANALYSIS COMPLETE ===');
-    console.log('[YT-AdSkip] Video:', title);
     console.log('[YT-AdSkip] Found', useless.length, 'useless sections:');
     console.table(useless);
 
+    // Cache full data
+    AdSkipManager.setCache(videoId, { title, transcript, useless });
+
     // Auto-apply
-    await AdSkipManager.setCache(videoId, useless);
     const intervalId = ytAdSkip(useless);
     AdSkipManager.start(videoId, intervalId);
     console.log('[YT-AdSkip] Ad skip ACTIVE');
-    Util.toast(`Ad skip active: ${useless.length} sections`);
+    SkipPanel.show(useless, title);
   } else {
-    console.log('[YT-AdSkip] No useless sections found');
+    // Cache transcript even if no useless sections
+    AdSkipManager.setCache(videoId, { title, transcript, useless: [] });
+    console.log('[YT-AdSkip] No useless sections found (cached)');
     Util.toast('No useless sections found');
   }
 };
@@ -609,6 +988,8 @@ window.onkeyup = document.onkeyup = Shortcut.init({
     Shortcut.fun('c', () => copyUrl(true)),
     // alt-g to analyze transcript with Gemini and start ad skip
     Shortcut.fun('g', () => analyzeAndSkip()),
+    // alt-p to toggle skip panel
+    Shortcut.fun('p', () => SkipPanel.toggle()),
     // alt-v multiple times to track particular sections of the video
     Shortcut.fun('v', () => tracker.ckpt()),
     // alt-w to copy the title
