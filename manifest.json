@@ -26,11 +26,27 @@
   },
   "content_scripts": [
     {
+      "matches": [
+        "file:///*.md", 
+        "https://*/*.md", 
+        "http://*/*.md", 
+        "*://defuddle.md/*",
+        "*://*.defuddle.md/*"
+      ],
+      "js": [
+        "util/marked.min.js",
+        "content/mdrender.js"
+      ],
+      "run_at": "document_end",
+      "all_frames": true
+    },
+    {
       "matches": ["<all_urls>"],
       "js": [
         "util/include.js",
         "content/misc.js",
-        "content/latex.js"
+        "content/latex.js",
+        "content/extractor.js"
       ],
       "css": [
         "css/util.css"
@@ -55,7 +71,7 @@
       "run_at": "document_start"
     },
     {
-      "matches": ["https://bsky.app/*"],
+      "matches": ["https://bsky.app/*", "https://*.bsky.social/*"],
       "js": [
         "util/include.js",
         "content/bsky.js"
