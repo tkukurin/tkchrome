@@ -34,7 +34,10 @@
         "*://*.defuddle.md/*"
       ],
       "js": [
+        "util/katex.min.js",
         "util/marked.min.js",
+        "util/marked.katex.min.js",
+        "util/md.highlight.min.js",
         "content/mdrender.js"
       ],
       "run_at": "document_end",
