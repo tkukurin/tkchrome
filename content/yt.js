@@ -654,17 +654,52 @@ const TranscriptFetcher = {
     return `${m}:${s.toString().padStart(2, '0')}`;
   },
 
+  // Try to open the transcript panel in the YT UI
+  async openTranscriptPanel() {
+    try {
+      // Click the "..." menu button under the video
+      document.querySelector('#info #button > yt-icon.ytd-menu-renderer')?.click();
+      await new Promise(r => setTimeout(r, 300));
+
+      // Find and click the "Show transcript" button
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+        acceptNode: (node) =>
+          /\b(Show transcript|Display transcript|Transcript|View transcript|See transcript)\b/i.test(node.nodeValue)
+            ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT
+      });
+      while (walker.nextNode()) {
+        let el = walker.currentNode;
+        for (let i = 0; i < 5 && el; i++, el = el.parentNode) {
+          if (el.tagName === 'BUTTON') { el.click(); return true; }
+        }
+      }
+    } catch (e) {
+      console.log('[YT-AdSkip] Failed to open transcript panel:', e);
+    }
+    return false;
+  },
+
   // Main entry - tries all strategies
   async get(videoId) {
-    // Try DOM strategies first (faster)
+    // Try DOM strategies first (faster, if panel already open)
     let result = this.fromNewDOM() || this.fromOldDOM() || this.fromLegacyDOM();
 
     if (result?.length) {
       return this.dedupe(result);
     }
 
+    // Try opening the transcript panel, then re-check DOM
+    console.log('[YT-AdSkip] DOM strategies failed, trying to open transcript panel...');
+    if (await this.openTranscriptPanel()) {
+      await new Promise(r => setTimeout(r, 500));
+      result = this.fromNewDOM() || this.fromOldDOM() || this.fromLegacyDOM();
+      if (result?.length) {
+        return this.dedupe(result);
+      }
+    }
+
     // Fall back to API
-    console.log('[YT-AdSkip] DOM strategies failed, trying API...');
+    console.log('[YT-AdSkip] Panel strategies failed, trying API...');
     result = await this.fromAPI(videoId);
 
     if (result?.length) {
@@ -782,7 +817,7 @@ window.skipUseless = () => {
 };
 
 function secsToHmsStr(tSec) {
-  const hms = [tSec/3600, (tSec/60)%60, (tSec%60)].map(n => parseInt(n));
+  const hms = [tSec / 3600, (tSec / 60) % 60, (tSec % 60)].map(n => parseInt(n));
   return hms.map((n, i) => n ? `${n}${'hms'[i]}` : '').join('');
 }
 
@@ -807,18 +842,18 @@ function ytAdSkip(useless) {
   const videoElement = document.querySelector('video');
   const timeDisplayElement = document.querySelector('.ytp-time-current');
   if (!videoElement || !timeDisplayElement) {
-      return Util.toast('Ad Skipper: Could not find video or time display element.');
+    return Util.toast('Ad Skipper: Could not find video or time display element.');
   }
-  const tts = t => t.split(':').map(part => parseInt(part, 10)).reduce((acc, cur) => acc*60+cur, 0);
+  const tts = t => t.split(':').map(part => parseInt(part, 10)).reduce((acc, cur) => acc * 60 + cur, 0);
   const skipAdCheck = () => {
-      for (const ad of useless) {
-          let s = tts(ad.start); let e = tts(ad.end);
-          if (videoElement.currentTime >= s && videoElement.currentTime < e) {
-              Util.toast(`adskip: ${ad.start} to ${ad.end}`);
-              videoElement.currentTime = e;
-              break;
-          }
+    for (const ad of useless) {
+      let s = tts(ad.start); let e = tts(ad.end);
+      if (videoElement.currentTime >= s && videoElement.currentTime < e) {
+        Util.toast(`adskip: ${ad.start} to ${ad.end}`);
+        videoElement.currentTime = e;
+        break;
       }
+    }
   };
   let i = setInterval(skipAdCheck, 1000);
   console.log(`Ad skipper active. use clearInterval(i) to stop. i=${i}`);
@@ -835,105 +870,66 @@ class Subtitles {
       let tstamp = timeStr.split(':').map(n => parseInt(n)).reverse()
         .map((n, i) => (n * Math.pow(60, i)))
         .reduce((a, b) => a + b);
-      subtitles.push({timeStr, tstamp, content});
+      subtitles.push({ timeStr, tstamp, content });
     }
 
     this.subs = new SortedArray(subtitles, 'tstamp');
   }
 
-  around(secs, secsBefore=5, secsAfter=5) {
+  /** Build from TranscriptFetcher output (array of "M:SS text" strings). */
+  static fromTranscriptLines(lines) {
+    const subtitles = lines.map(line => {
+      const match = line.match(/^([\d:]+)\s+([\s\S]*)/);
+      if (!match) return null;
+      const timeStr = match[1].trim();
+      const content = match[2].trim();
+      const tstamp = timeStr.split(':').map(n => parseInt(n)).reverse()
+        .map((n, i) => (n * Math.pow(60, i)))
+        .reduce((a, b) => a + b);
+      return { timeStr, tstamp, content };
+    }).filter(Boolean);
+    const subs = Object.create(Subtitles.prototype);
+    subs.subs = new SortedArray(subtitles, 'tstamp');
+    return subs;
+  }
+
+  around(secs, secsBefore = 5, secsAfter = 5) {
     return this.get(Math.max(0, secs - secsBefore), secs + secsAfter);
   }
 
   get(secs, maybeEndSecs) {
     const subs = this.subs.get(secs, maybeEndSecs);
     if (!subs.length) {  // no subs, but return position
-      return {tstamp: secs, timeStr: secsToHmsStr(secs)};
+      return { tstamp: secs, timeStr: secsToHmsStr(secs) };
     }
     const content = subs.map(x => x.content).join('\n');
     return { content, tstamp: subs[0].tstamp, timeStr: subs[0].timeStr };
   }
 }
 
-function tryFindTranscripts() {
-  let treeWalker = document.createTreeWalker(
-    document.body,
-    NodeFilter.SHOW_TEXT,
-    {
-      acceptNode: function(node) {
-        if (/\b(Show transcript|Display transcript|Transcript|View transcript|See transcript)\b/i.test(node.nodeValue)) {
-            return NodeFilter.FILTER_ACCEPT;
-        }
-      }
-    },
-    false
-  );
-
-  function findParentBtn(node) {
-    for (var i = 0, parent = node.parentNode; i < 5 && node; i++, parent = (node || {}).parentNode) {
-      if (node.tagName == 'BUTTON') {
-        return node;
-      }
-      node = parent;
-    }
-    return null;
-  }
-
-  let nodes = [];
-  while(treeWalker.nextNode()) {
-    var parentBtn = findParentBtn(treeWalker.currentNode);
-    if (parentBtn) {
-      nodes.push(parentBtn);
-    }
-  }
-  return nodes;
-}
-
 /** Try show subtitles and c/p relevant info. */
 async function cpImportantInfo() {
-  const subtitleWrapSel = '*[target-id=engagement-panel-searchable-transcript]';
-  document.querySelector('#info #button > yt-icon.ytd-menu-renderer').click();
-  await Retry.sleep(250);
-  const openTranscriptItem = tryFindTranscripts()
-  if (!openTranscriptItem.length) return Util.toast('No transcript item found!');
-  // this actually does happen on yt ... not sure if should have better chk
-  // if (openTranscriptItem.length > 1) { console.log("Found multiple candidates:", openTranscriptItem); }
-  openTranscriptItem[0].click();
+  const videoId = getVideoId();
+  if (!videoId) return Util.toast('Not on a video page');
 
-  new Retry().call(() => {
-    let subWrap = document.querySelector(subtitleWrapSel);
-    if (subs = subWrap.querySelectorAll('#body ytd-transcript-segment-renderer')) {
-      return new Subtitles(subs);
-    }
-  }).then(subs => {
-    window.tamperSubs = subs;
-    Util.toast('Tracking with captions');
-    return subs
-  }).then(async () => {
-    await Retry.sleep(500)
-    const sel = '#body #segments-container yt-formatted-string.segment-text'
-    const allTranscripts = Array.from(document.querySelectorAll(sel))
-      .map(x => x.parentNode.innerText)
-    const seen = new Set()
-    const deduplicated = allTranscripts.filter(x => {
-      const normalized = x.trim().replace(/\s+/g, ' ')
-      if (seen.has(normalized)) return false
-      seen.add(normalized)
-      return true
-    })
-    return deduplicated
-  }).then(allTranscripts => {
-    const url = getUrl()
-    const title = document.querySelector('#title h1').innerText.trim()
-    const base = `---\ntitle: "${title}"\nsource: ${url}\n---\n\n`
-    const presentation = allTranscripts.join('\n')
-    navigator.clipboard.writeText(`${base}## Transcript\n\n${presentation}`)
-    Util.toast('C/p captions!')
-  }).catch(msg => {
-    console.error(msg);
-    Util.toast('Failed getting captions');
-  });
+  Util.toast('Fetching transcript...');
+  const transcripts = await TranscriptFetcher.get(videoId);
 
+  if (!transcripts?.length) {
+    Util.toast('No transcript found');
+    return;
+  }
+
+  // Build Subtitles for real-time caption tracking (alt+c)
+  window.tamperSubs = Subtitles.fromTranscriptLines(transcripts);
+  Util.toast('Tracking with captions');
+
+  const url = getUrl();
+  const title = document.querySelector('#title h1')?.innerText?.trim() || 'Unknown';
+  const base = `---\ntitle: "${title}"\nsource: ${url}\n---\n\n`;
+  const presentation = transcripts.join('\n');
+  navigator.clipboard.writeText(`${base}## Transcript\n\n${presentation}`);
+  Util.toast('C/p captions!');
 }
 
 /** Quick&dirty class encapsulating all captions within a session. */
@@ -972,7 +968,7 @@ function getPlaylistLines() {
   const sel = '#contents ytd-playlist-video-renderer a#video-title'
   const titles = Array
     .from(document.querySelectorAll(sel))
-    .map(x => ({text: x.innerText.trim(), href: x.href}))
+    .map(x => ({ text: x.innerText.trim(), href: x.href }))
   const presentation = titles
     .map(t => `[${t.text}](${t.href})`)
     .join('\n* ');
