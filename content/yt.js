@@ -6,7 +6,7 @@
  *   chrome.storage.local.set({GOOGLE_API_KEY: 'your-key'})
  *
  * USAGE:
- *   alt+g  analyze & skip    alt+p  toggle panel    alt+o  load transcript
+ *   alt+g  analyze & skip    alt+f  follow-up    alt+p  toggle panel    alt+o  load transcript
  *
  * HOW IT WORKS:
  *   1. Fetches transcript (DOM or YT timedtext API fallback)
@@ -448,6 +448,51 @@ async function getGeminiApiKey() {
 // Store last raw response for debugging
 window.lastGeminiResponse = null;
 
+// Conversation history for follow-up questions
+const GeminiConversation = {
+  history: [], // Array of {role: 'user'|'model', parts: [{text}]}
+
+  reset() { this.history = []; },
+
+  addUser(text) { this.history.push({ role: 'user', parts: [{ text }] }); },
+  addModel(text) { this.history.push({ role: 'model', parts: [{ text }] }); },
+
+  async send(text) {
+    const apiKey = await getGeminiApiKey();
+    if (!apiKey) { Util.toast('No Gemini API key'); return null; }
+
+    this.addUser(text);
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: this.history,
+            generationConfig: { temperature: 0.1 }
+          })
+        }
+      );
+      if (!response.ok) {
+        const err = await response.text();
+        console.error('[YT-AdSkip] Gemini API error:', response.status, err);
+        Util.toast(`Gemini API error: ${response.status}`);
+        return null;
+      }
+      const data = await response.json();
+      window.lastGeminiResponse = data;
+      const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (responseText) this.addModel(responseText);
+      return responseText;
+    } catch (e) {
+      console.error('[YT-AdSkip] Gemini request failed:', e);
+      Util.toast('Gemini request failed');
+      return null;
+    }
+  }
+};
+
 async function analyzeTranscriptWithGemini(transcript, title) {
   const apiKey = await getGeminiApiKey();
   if (!apiKey) {
@@ -475,58 +520,33 @@ If there are no useless sections, return an empty array: []`;
 
   console.log('[YT-AdSkip] Sending request to Gemini...');
 
+  // Reset conversation and use it for the initial analysis
+  GeminiConversation.reset();
+  const text = await GeminiConversation.send(prompt);
+  console.log('[YT-AdSkip] Response text:', text);
+
+  if (!text) {
+    Util.toast('No response from Gemini');
+    return null;
+  }
+
+  return parseUselessJson(text);
+}
+
+function parseUselessJson(text) {
+  const jsonMatch = text.match(/\[[\s\S]*?\]/);
+  if (!jsonMatch) {
+    console.error('[YT-AdSkip] Could not parse JSON from response:', text);
+    Util.toast('Could not parse Gemini response');
+    return null;
+  }
   try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.1 }
-        })
-      }
-    );
-
-    if (!response.ok) {
-      const err = await response.text();
-      console.error('[YT-AdSkip] Gemini API error:', response.status, err);
-      window.lastGeminiResponse = { error: true, status: response.status, body: err };
-      Util.toast(`Gemini API error: ${response.status}`);
-      return null;
-    }
-
-    const data = await response.json();
-    console.log('[YT-AdSkip] Raw Gemini response:', data);
-
-    // Store full response for debugging
-    window.lastGeminiResponse = data;
-    localStorage.setItem('lastGeminiResponse', JSON.stringify(data));
-
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    console.log('[YT-AdSkip] Response text:', text);
-
-    if (!text) {
-      console.log('[YT-AdSkip] No text in response. Check lastGeminiResponse');
-      Util.toast('No response from Gemini');
-      return null;
-    }
-
-    // Parse JSON from response (handle potential markdown wrapping)
-    const jsonMatch = text.match(/\[[\s\S]*?\]/);
-    if (!jsonMatch) {
-      console.error('[YT-AdSkip] Could not parse JSON from response:', text);
-      Util.toast('Could not parse Gemini response');
-      return null;
-    }
-
     const parsed = JSON.parse(jsonMatch[0]);
     console.log('[YT-AdSkip] Parsed result:', parsed);
     return parsed;
   } catch (e) {
-    console.error('[YT-AdSkip] Gemini request failed:', e);
-    window.lastGeminiResponse = { error: true, exception: e.message };
-    Util.toast('Gemini request failed');
+    console.error('[YT-AdSkip] JSON parse error:', e);
+    Util.toast('Could not parse Gemini response');
     return null;
   }
 }
@@ -534,111 +554,63 @@ If there are no useless sections, return an empty array: []`;
 async function initAdSkipForVideo(videoId) {
   if (!videoId) return;
 
-  // Check cache first
+  // Don't auto-start ad skipping on navigation; user must press alt+g
   const cached = AdSkipManager.getCached(videoId);
   if (cached && cached.useless?.length) {
-    console.log('[YT-AdSkip] Using cached data for', videoId);
-    console.log('[YT-AdSkip] Title:', cached.title);
-    console.log('[YT-AdSkip] Skipping', cached.useless.length, 'sections:');
-    console.table(cached.useless);
-    const intervalId = ytAdSkip(cached.useless);
-    AdSkipManager.start(videoId, intervalId);
-    // Show panel minimized for cached (less intrusive)
-    SkipPanel.show(cached.useless, cached.title, true);
-    return;
+    console.log('[YT-AdSkip] Cached data exists for', videoId, '- press alt+g to activate');
+  } else {
+    console.log('[YT-AdSkip] No cached data for', videoId, '- press alt+g to analyze');
   }
-
-  // No cache - will need transcript analysis
-  console.log('[YT-AdSkip] No cached data for', videoId, '- press alt+g to analyze');
 }
 
 // Store pending results for review
 window.pendingUseless = null;
 
-// Get transcript - multiple strategies with fallback
+// Get transcript via YouTube's timedtext API — no DOM scraping needed.
 const TranscriptFetcher = {
-  // Strategy 1: New YT DOM structure (2024+)
-  fromNewDOM() {
-    const segments = document.querySelectorAll('transcript-segment-view-model');
-    if (!segments.length) return null;
-    console.log('[YT-AdSkip] Using new DOM structure');
-    return Array.from(segments).map(seg => {
-      const time = seg.querySelector('.ytwTranscriptSegmentViewModelTimestamp')?.textContent?.trim() || '';
-      const text = seg.querySelector('span.yt-core-attributed-string')?.textContent?.trim() || '';
-      return `${time} ${text}`;
-    });
-  },
-
-  // Strategy 2: Old YT DOM structure
-  fromOldDOM() {
-    const sel = '#body #segments-container yt-formatted-string.segment-text';
-    const segments = document.querySelectorAll(sel);
-    if (!segments.length) return null;
-    console.log('[YT-AdSkip] Using old DOM structure');
-    return Array.from(segments).map(x => x.parentNode.innerText);
-  },
-
-  // Strategy 3: Alternative old structure
-  fromLegacyDOM() {
-    const segments = document.querySelectorAll('ytd-transcript-segment-renderer');
-    if (!segments.length) return null;
-    console.log('[YT-AdSkip] Using legacy DOM structure');
-    return Array.from(segments).map(x => x.innerText);
-  },
-
-  // Strategy 4: Fetch from YouTube's timedtext API
-  async fromAPI(videoId) {
-    console.log('[YT-AdSkip] Trying API fetch for', videoId);
-    try {
-      // First get the caption track URL from player response
-      const playerResponse = window.ytInitialPlayerResponse ||
-        await this.fetchPlayerResponse(videoId);
-
-      if (!playerResponse) {
-        console.log('[YT-AdSkip] No player response found');
-        return null;
+  // Get caption tracks from the player response embedded in the page's <script> tags.
+  // Content scripts can read script tag text (it's DOM), just can't execute page JS.
+  getPlayerResponse() {
+    for (const script of document.querySelectorAll('script')) {
+      const text = script.textContent;
+      const marker = 'ytInitialPlayerResponse';
+      const idx = text.indexOf(marker);
+      if (idx === -1) continue;
+      // Find the '=' after the variable name
+      const eqIdx = text.indexOf('=', idx + marker.length);
+      if (eqIdx === -1) continue;
+      // Find the JSON start
+      const jsonStart = text.indexOf('{', eqIdx);
+      if (jsonStart === -1) continue;
+      // Balanced brace match
+      let depth = 0;
+      for (let i = jsonStart; i < text.length; i++) {
+        if (text[i] === '{') depth++;
+        else if (text[i] === '}') {
+          depth--;
+          if (depth === 0) {
+            try { return JSON.parse(text.substring(jsonStart, i + 1)); }
+            catch { return null; }
+          }
+        }
       }
-
-      const captions = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-      if (!captions?.length) {
-        console.log('[YT-AdSkip] No caption tracks found');
-        return null;
-      }
-
-      // Prefer English, fall back to first available
-      const track = captions.find(t => t.languageCode?.startsWith('en')) || captions[0];
-      console.log('[YT-AdSkip] Found caption track:', track.languageCode);
-
-      // Fetch the actual captions (request JSON format)
-      const url = track.baseUrl + '&fmt=json3';
-      const resp = await fetch(url);
-      const data = await resp.json();
-
-      if (!data.events) {
-        console.log('[YT-AdSkip] No events in caption data');
-        return null;
-      }
-
-      return data.events
-        .filter(e => e.segs)
-        .map(e => {
-          const time = this.formatTime(e.tStartMs / 1000);
-          const text = e.segs.map(s => s.utf8).join('');
-          return `${time} ${text}`;
-        });
-    } catch (err) {
-      console.error('[YT-AdSkip] API fetch failed:', err);
-      return null;
     }
+    return null;
   },
 
+  // Fallback: re-fetch the page HTML if script tags were already cleared (SPA navigation)
   async fetchPlayerResponse(videoId) {
     try {
       const resp = await fetch(`https://www.youtube.com/watch?v=${videoId}`);
       const html = await resp.text();
-      const match = html.match(/ytInitialPlayerResponse\s*=\s*({.+?});/);
-      if (match) {
-        return JSON.parse(match[1]);
+      const marker = 'ytInitialPlayerResponse = ';
+      const startIdx = html.indexOf(marker);
+      if (startIdx === -1) return null;
+      const jsonStart = startIdx + marker.length;
+      let depth = 0;
+      for (let i = jsonStart; i < html.length; i++) {
+        if (html[i] === '{') depth++;
+        else if (html[i] === '}') { depth--; if (depth === 0) return JSON.parse(html.substring(jsonStart, i + 1)); }
       }
     } catch (err) {
       console.error('[YT-AdSkip] Failed to fetch player response:', err);
@@ -654,70 +626,193 @@ const TranscriptFetcher = {
     return `${m}:${s.toString().padStart(2, '0')}`;
   },
 
-  // Try to open the transcript panel in the YT UI
-  async openTranscriptPanel() {
-    try {
-      // Click the "..." menu button under the video
-      document.querySelector('#info #button > yt-icon.ytd-menu-renderer')?.click();
-      await new Promise(r => setTimeout(r, 300));
-
-      // Find and click the "Show transcript" button
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
-        acceptNode: (node) =>
-          /\b(Show transcript|Display transcript|Transcript|View transcript|See transcript)\b/i.test(node.nodeValue)
-            ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT
-      });
-      while (walker.nextNode()) {
-        let el = walker.currentNode;
-        for (let i = 0; i < 5 && el; i++, el = el.parentNode) {
-          if (el.tagName === 'BUTTON') { el.click(); return true; }
-        }
-      }
-    } catch (e) {
-      console.log('[YT-AdSkip] Failed to open transcript panel:', e);
-    }
-    return false;
+  parseCaptionEvents(data) {
+    if (!data?.events) return null;
+    const lines = data.events
+      .filter(e => e.segs)
+      .map(e => {
+        const time = this.formatTime(e.tStartMs / 1000);
+        const text = e.segs.map(s => s.utf8).join('').trim();
+        return `${time} ${text}`;
+      })
+      .filter(line => line.replace(/^[\d:]+\s*/, '').length > 0);
+    return lines.length ? lines : null;
   },
 
-  // Main entry - tries all strategies
-  async get(videoId) {
-    // Try DOM strategies first (faster, if panel already open)
-    let result = this.fromNewDOM() || this.fromOldDOM() || this.fromLegacyDOM();
+  async fetchCaptions(captionTracks) {
+    const track = captionTracks.find(t => t.languageCode?.startsWith('en')) || captionTracks[0];
+    console.log('[YT-AdSkip] Found caption track:', track.languageCode, track.baseUrl?.slice(0, 80));
 
-    if (result?.length) {
-      return this.dedupe(result);
-    }
-
-    // Try opening the transcript panel, then re-check DOM
-    console.log('[YT-AdSkip] DOM strategies failed, trying to open transcript panel...');
-    if (await this.openTranscriptPanel()) {
-      await new Promise(r => setTimeout(r, 500));
-      result = this.fromNewDOM() || this.fromOldDOM() || this.fromLegacyDOM();
-      if (result?.length) {
-        return this.dedupe(result);
+    // Try json3 format first, then fall back to default XML
+    for (const suffix of ['&fmt=json3', '']) {
+      try {
+        const url = track.baseUrl + suffix;
+        const resp = await fetch(url);
+        console.log('[YT-AdSkip] timedtext fetch', suffix || 'xml', '→', resp.status, resp.statusText);
+        if (!resp.ok) continue;
+        const text = await resp.text();
+        console.log('[YT-AdSkip] timedtext response length:', text.length, 'preview:', text.slice(0, 200));
+        if (!text.length) continue;
+        if (text.startsWith('{')) {
+          const result = this.parseCaptionEvents(JSON.parse(text));
+          if (result) return result;
+        } else if (text.includes('<text')) {
+          const result = this.parseXmlCaptions(text);
+          if (result) return result;
+        }
+      } catch (e) {
+        console.log('[YT-AdSkip] timedtext fetch error', suffix || 'xml', ':', e.message);
       }
     }
-
-    // Fall back to API
-    console.log('[YT-AdSkip] Panel strategies failed, trying API...');
-    result = await this.fromAPI(videoId);
-
-    if (result?.length) {
-      return this.dedupe(result);
-    }
-
     return null;
   },
 
-  dedupe(transcripts) {
-    const seen = new Set();
-    return transcripts.filter(x => {
-      const normalized = x.trim().replace(/\s+/g, ' ');
-      if (!normalized || seen.has(normalized)) return false;
-      seen.add(normalized);
-      return true;
-    });
-  }
+  parseXmlCaptions(xml) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xml, 'text/xml');
+    const texts = doc.querySelectorAll('text');
+    if (!texts.length) return null;
+    const lines = Array.from(texts).map(node => {
+      const secs = parseFloat(node.getAttribute('start') || '0');
+      const time = this.formatTime(secs);
+      const text = node.textContent.replace(/\n/g, ' ').trim();
+      return `${time} ${text}`;
+    }).filter(line => line.replace(/^[\d:]+\s*/, '').length > 0);
+    return lines.length ? lines : null;
+  },
+
+  // Use YouTube's internal get_transcript API (same as their UI uses)
+  async fromInternalAPI(videoId) {
+    console.log('[YT-AdSkip] Trying internal get_transcript API...');
+    try {
+      const resp = await fetch('https://www.youtube.com/youtubei/v1/get_transcript', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          context: {
+            client: { clientName: 'WEB', clientVersion: '2.20240101.00.00' }
+          },
+          params: btoa(`\n\x0b${videoId}`)
+        })
+      });
+      if (!resp.ok) {
+        console.log('[YT-AdSkip] get_transcript API returned', resp.status);
+        return null;
+      }
+      const data = await resp.json();
+      const renderer = data?.actions?.[0]?.updateEngagementPanelAction?.content
+        ?.transcriptRenderer?.body?.transcriptBodyRenderer;
+      if (!renderer?.cueGroups) {
+        console.log('[YT-AdSkip] No cueGroups in get_transcript response');
+        return null;
+      }
+      const lines = renderer.cueGroups.map(g => {
+        const cue = g.transcriptCueGroupRenderer?.cues?.[0]?.transcriptCueRenderer;
+        if (!cue) return null;
+        const ms = parseInt(cue.startOffsetMs || '0');
+        const time = this.formatTime(ms / 1000);
+        const text = cue.cue?.simpleText || cue.cue?.runs?.map(r => r.text).join('') || '';
+        return `${time} ${text.trim()}`;
+      }).filter(line => line && line.replace(/^[\d:]+\s*/, '').length > 0);
+      return lines.length ? lines : null;
+    } catch (e) {
+      console.error('[YT-AdSkip] get_transcript API failed:', e);
+      return null;
+    }
+  },
+
+  // Click "Show transcript" button and read segments from the DOM
+  async fromPanel() {
+    // First expand the description if needed to reveal the transcript button
+    const descToggle = document.querySelector('#description tp-yt-paper-button#expand') ||
+      document.querySelector('#expand.ytd-text-inline-expander');
+    if (descToggle) { descToggle.click(); await new Promise(r => setTimeout(r, 300)); }
+
+    // Click the "Show transcript" button
+    const btn = document.querySelector('ytd-video-description-transcript-section-renderer button');
+    if (!btn) {
+      console.log('[YT-AdSkip] No "Show transcript" button found');
+      return null;
+    }
+    console.log('[YT-AdSkip] Clicking "Show transcript" button...');
+    btn.click();
+    // Wait for panel to load (transcript segments are fetched async)
+    for (let attempt = 0; attempt < 10; attempt++) {
+      await new Promise(r => setTimeout(r, 500));
+      const segments = this.readPanelSegments();
+      if (segments) return segments;
+    }
+    console.log('[YT-AdSkip] Transcript panel opened but no segments found');
+    return null;
+  },
+
+  readPanelSegments() {
+    // Try multiple known segment selectors
+    const selectors = [
+      'ytd-transcript-segment-renderer',
+      'transcript-segment-view-model',
+    ];
+    for (const sel of selectors) {
+      const segments = document.querySelectorAll(sel);
+      if (!segments.length) continue;
+      const lines = Array.from(segments).map(seg => {
+        const parts = seg.innerText?.trim().split('\n').map(s => s.trim()).filter(Boolean) || [];
+        // First part is typically the timestamp, rest is text
+        const time = parts[0] || '';
+        const text = parts.slice(1).join(' ');
+        return `${time} ${text}`;
+      }).filter(line => line.replace(/^[\d:]+\s*/, '').trim().length > 0);
+      if (lines.length) {
+        console.log('[YT-AdSkip] Got', lines.length, 'segments from panel via', sel);
+        return lines;
+      }
+    }
+    return null;
+  },
+
+  async get(videoId) {
+    console.log('[YT-AdSkip] Fetching transcript for', videoId);
+
+    // 1. Check if transcript panel is already open
+    const existing = this.readPanelSegments();
+    if (existing) return existing;
+
+    // 2. Click "Show transcript" button and read DOM
+    try {
+      const result = await this.fromPanel();
+      if (result) return result;
+    } catch (e) {
+      console.log('[YT-AdSkip] Panel approach failed:', e.message);
+    }
+
+    // 3. Fallback: YouTube's internal get_transcript API
+    try {
+      const result = await this.fromInternalAPI(videoId);
+      if (result) return result;
+    } catch (e) {
+      console.log('[YT-AdSkip] Internal API failed:', e.message);
+    }
+
+    // 4. Fallback: timedtext API via player response
+    for (const getResponse of [
+      () => this.getPlayerResponse(),
+      () => this.fetchPlayerResponse(videoId),
+    ]) {
+      try {
+        const pr = await getResponse();
+        const tracks = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+        if (tracks?.length) {
+          const result = await this.fetchCaptions(tracks);
+          if (result) return result;
+        }
+      } catch (e) {
+        console.log('[YT-AdSkip] timedtext source failed:', e.message);
+      }
+    }
+
+    console.log('[YT-AdSkip] All transcript sources exhausted');
+    return null;
+  },
 };
 
 // Analyze transcript with Gemini. force=true re-runs even if cached.
@@ -788,6 +883,57 @@ window.analyzeAndSkip = async (force = false) => {
     Util.toast('No useless sections found');
   }
 };
+
+// Follow up on ad filtering with a prompt (e.g. "skip more aggressively" or "keep the intro")
+async function adSkipFollowUp() {
+  const videoId = getVideoId();
+  if (!videoId) return Util.toast('Not on a video page');
+
+  // Rebuild conversation from cache if needed (e.g. after navigation or cached analysis)
+  const cached = AdSkipManager.getCached(videoId);
+  if (!GeminiConversation.history.length) {
+    if (!cached?.transcript || !cached?.useless) return Util.toast('Run alt+g first to analyze');
+    GeminiConversation.reset();
+    GeminiConversation.addUser(`## Video Title\n${cached.title}\n\n## Transcript\n${cached.transcript}\n\nExtract useless sections as JSON array.`);
+    GeminiConversation.addModel(JSON.stringify(cached.useless));
+  }
+
+  Util.toast('Type your follow-up and press Enter');
+  const input = await new Promise(resolve => {
+    const box = Util.inputBox((data) => { resolve(data); });
+    box.placeholder = 'e.g. "skip more", "keep the intro", "less aggressive"';
+    box.style.width = '500px';
+  });
+
+  if (!input) return;
+
+  Util.toast('Sending follow-up to Gemini...');
+  const followUpPrompt = `${input}
+
+Return the UPDATED complete list of useless sections as a JSON array. Same format:
+[{ "start": "MM:SS", "end": "MM:SS", "why": "reason" }]
+Return ONLY the JSON array, no markdown, no code blocks.`;
+
+  const responseText = await GeminiConversation.send(followUpPrompt);
+  if (!responseText) return;
+
+  const useless = parseUselessJson(responseText);
+  if (!useless) return;
+
+  console.log('[YT-AdSkip] Follow-up result:', useless.length, 'sections');
+  console.table(useless);
+
+  const title = cached?.title || document.querySelector('#title h1')?.innerText?.trim() || 'Unknown';
+  AdSkipManager.setCache(videoId, { ...cached, title, useless });
+
+  AdSkipManager.cleanup();
+  if (useless.length) {
+    const intervalId = ytAdSkip(useless);
+    AdSkipManager.start(videoId, intervalId);
+  }
+  SkipPanel.show(useless, title);
+  Util.toast(`Updated: ${useless.length} skip sections`);
+}
 
 // Apply pending useless sections
 window.applyUseless = async () => {
@@ -976,7 +1122,7 @@ function getPlaylistLines() {
 }
 
 const tracker = new Tracker();
-window.onkeyup = document.onkeyup = Shortcut.init({
+const ytShortcutHandler = Shortcut.init({
   a: [
     // alt-a to copy url at current tstamp without captions
     Shortcut.fun('a', () => copyUrl(false)),
@@ -984,6 +1130,8 @@ window.onkeyup = document.onkeyup = Shortcut.init({
     Shortcut.fun('c', () => copyUrl(true)),
     // alt-g to analyze transcript with Gemini and start ad skip
     Shortcut.fun('g', () => analyzeAndSkip()),
+    // alt-f to follow up on ad filtering
+    Shortcut.fun('f', () => adSkipFollowUp()),
     // alt-p to toggle skip panel
     Shortcut.fun('p', () => SkipPanel.toggle()),
     // alt-v multiple times to track particular sections of the video
@@ -1030,3 +1178,5 @@ window.onkeyup = document.onkeyup = Shortcut.init({
   ],
   m: [Shortcut.sel('b', '.ytp-fullscreen-button.ytp-button'),]
 });
+// Use addEventListener to avoid being overwritten by other content scripts
+document.addEventListener('keyup', ytShortcutHandler, true);
