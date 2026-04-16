@@ -65,50 +65,6 @@ function isVisible(el) {  // -> bool
  * @returns {boolean} - True if an element was found and clicked.
  */
 function findInNode(node, depth) {
-    if (timedOut || depth > MAX_TRAVERSAL_DEPTH) {
-        return false;
-    }
-
-    for (const item of selectors) {
-        try {
-            const elements = node.querySelectorAll(item.selector);
-            for (const el of elements) {
-                if (timedOut) return true; // Exit if timeout occurred during loop
-                let found = false;
-                if (item.type === 'text') {
-                    if (item.text.some(t => el.textContent.toLowerCase().includes(t)) && isVisible(el)) {
-                        found = true;
-                    }
-                } else if (isVisible(el)) {
-                    found = true;
-                }
-                if (found) {
-                    clickElement(el);
-                    return true;
-                }
-            }
-        } catch (e) { /* Ignore errors */ }
-    }
-
-    // Search deeper in shadow roots
-    const allElements = node.querySelectorAll('*');
-    for (const el of allElements) {
-        if (el.shadowRoot) {
-            if (findInNode(el.shadowRoot, depth + 1)) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-/**
- * Recursively searches for the target element with guardrails.
- * @param {Document|ShadowRoot} node
- * @param {number} depth - The current traversal depth.
- * @returns {boolean} - True if an element was found and clicked.
- */
-function findInNode(node, depth) {
   if (timedOut || depth > MAX_TRAVERSAL_DEPTH) return false;
   for (const item of selectors) {
     try {

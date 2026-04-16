@@ -1,4 +1,3 @@
-
 // Service worker for manifest v3
 // Import utilities - note: importScripts needed for service worker
 try {
@@ -86,31 +85,31 @@ const dbPromise = new Promise((resolve, reject) => {
   };
 });
 
-function saveToIndexedDB(url, details) {
-  const requestData = {
-    url: url,
-    method: details.method,
-    requestHeaders: details.requestHeaders,
-    // Add more properties as needed
-  };
+// function saveToIndexedDB(url, details) {
+//   const requestData = {
+//     url: url,
+//     method: details.method,
+//     requestHeaders: details.requestHeaders,
+//     // Add more properties as needed
+//   };
 
-  // Open the database and perform the transaction
-  dbPromise.then((db) => {
-    const transaction = db.transaction(["requests"], "readwrite");
-    const objectStore = transaction.objectStore("requests");
+//   // Open the database and perform the transaction
+//   dbPromise.then((db) => {
+//     const transaction = db.transaction(["requests"], "readwrite");
+//     const objectStore = transaction.objectStore("requests");
 
-    // Add the data to the 'requests' object store
-    const request = objectStore.add(requestData);
+//     // Add the data to the 'requests' object store
+//     const request = objectStore.add(requestData);
 
-    request.onsuccess = function (event) {
-      console.log("Data saved to IndexedDB:", requestData);
-    };
+//     request.onsuccess = function (event) {
+//       console.log("Data saved to IndexedDB:", requestData);
+//     };
 
-    request.onerror = function (event) {
-      console.error("Error saving data to IndexedDB:", event.target.errorCode);
-    };
-  });
-}
+//     request.onerror = function (event) {
+//       console.error("Error saving data to IndexedDB:", event.target.errorCode);
+//     };
+//   });
+// }
 
 function saveToIndexedDB(url, details) {
   const requestData = {
@@ -150,7 +149,7 @@ function saveToIndexedDB(url, details) {
 // Service worker startup - register listeners on install
 chrome.runtime.onInstalled.addListener(() => {
   console.log('Extension installed/updated');
-  
+
   // Set up web request listeners if needed
   if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
     chrome.webRequest.onBeforeRequest.addListener(

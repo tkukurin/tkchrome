@@ -28,8 +28,6 @@
     {
       "matches": [
         "file:///*.md", 
-        "https://*/*.md", 
-        "http://*/*.md", 
         "*://defuddle.md/*",
         "*://*.defuddle.md/*"
       ],
@@ -86,6 +84,14 @@
       "js": [
         "util/include.js",
         "content/twitter.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "util/include.js",
+        "content/mdextract.js"
       ],
       "run_at": "document_start"
     },

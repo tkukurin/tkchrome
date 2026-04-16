@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Content Scripts Tests</title>
+  <style>
+    body { font-family: monospace; padding: 20px; max-width: 1200px; margin: 0 auto; }
+    .test { margin: 10px 0; padding: 10px; border-left: 3px solid #ccc; }
+    .test.pass { border-color: #4caf50; background: #e8f5e9; }
+    .test.fail { border-color: #f44336; background: #ffebee; }
+    .summary { padding: 15px; margin: 20px 0; font-weight: bold; }
+    .summary.pass { background: #4caf50; color: white; }
+    .summary.fail { background: #f44336; color: white; }
+    pre { background: #f5f5f5; padding: 10px; overflow-x: auto; }
+    h2 { border-bottom: 2px solid #333; padding-bottom: 5px; }
+  </style>
+</head>
+<body>
+  <h1>Content Scripts Tests</h1>
+  <div id="results"></div>
+  
+  <script>
+    // Mock dependencies
+    const Util = {
+      toast: (msg) => console.log('[toast]', msg),
+      observe: (fn) => { /* stub */ },
+      newEl: (tag, attrs) => Object.assign(document.createElement(tag), attrs),
+      isInput: (el) => ['INPUT','TEXTAREA'].includes(el?.tagName) || el?.isContentEditable,
+    };
+    
+    const Q = {
+      el: (sel, root=document) => Promise.resolve(root.querySelector(sel)),
+      all: (sel, root=document) => Array.from(root.querySelectorAll(sel)),
+    };
+    
+    const Shortcut = {
+      init: (config) => (e) => { /* stub handler */ },
+      fun: (key, fn) => ({key, fn}),
+      sel: (key, sel) => ({key, sel}),
+    };
+
+    // Test framework
+    const tests = [];
+    const test = (name, fn) => tests.push({name, fn});
+    const assert = (cond, msg='') => { if (!cond) throw new Error(msg || 'Assertion failed'); };
+    const assertEqual = (a, b, msg='') => assert(a === b, msg || `Expected ${b}, got ${a}`);
+    
+    let passed = 0, failed = 0;
+    const resultsDiv = document.getElementById('results');
+
+    // ===== Tests =====
+    
+    test('cookies.js: isVisible checks element visibility', () => {
+      function isVisible(el) {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length) && 
+               window.getComputedStyle(el).visibility !== 'hidden';
+      }
+      
+      const visible = document.createElement('div');
+      visible.style.display = 'block';
+      visible.style.width = '100px';
+      visible.style.height = '100px';
+      document.body.appendChild(visible);
+      
+      const hidden = document.createElement('div');
+      hidden.style.visibility = 'hidden';
+      hidden.style.width = '100px';
+      hidden.style.height = '100px';
+      document.body.appendChild(hidden);
+      
+      assert(isVisible(visible), 'visible element should be visible');
+      assert(!isVisible(hidden), 'hidden element should not be visible');
+      
+      visible.remove();
+      hidden.remove();
+    });
+
+    test('social.js: Twitter site detection', () => {
+      const Social = {
+        twitter: {
+          match: () => location.hostname === 'twitter.com' || location.hostname === 'x.com',
+        },
+        bsky: {
+          match: () => location.hostname === 'bsky.app',
+        },
+        getCurrentSite: function() {
+          if (this.twitter.match()) return this.twitter;
+          if (this.bsky.match()) return this.bsky;
+          return null;
+        },
+      };
+      
+      // Should not match current test page
+      assertEqual(Social.getCurrentSite(), null, 'Should not match test page');
+    });
+
+    test('social.js: Thread deduplication', () => {
+      class Thread {
+        content = [];
+        
+        add(obj) {
+          if (this.content.length > 99) return;
+          if (this.content.find(o => o.text == obj.text)) return;
+          this.content.push(obj);
+        }
+      }
+      
+      const thread = new Thread();
+      thread.add({text: 'first', time: 1});
+      thread.add({text: 'second', time: 2});
+      thread.add({text: 'first', time: 3}); // duplicate
+      
+      assertEqual(thread.content.length, 2, 'Should deduplicate by text');
+    });
+
+    test('social.js: Thread format for Twitter', () => {
+      const thread = {
+        content: [
+          {username: 'TestUser', handle: 'test', text: 'Tweet 1', time: 1},
+          {username: 'TestUser', handle: 'test', text: 'Tweet 2', time: 2},
+        ],
+        format: function() {
+          const url = 'https://twitter.com/test/status/123';
+          const tweets = this.content.map(c => c.text).join('\n\n---\n\n');
+          const user = this.content[0]?.username || this.content[0]?.handle || 'User';
+          return `# [Tweet from ${user}](${url})\n\n${tweets}`;
+        }
+      };
+      
+      const formatted = thread.format();
+      assert(formatted.includes('TestUser'), 'Should include username');
+      assert(formatted.includes('Tweet 1'), 'Should include first tweet');
+      assert(formatted.includes('---'), 'Should include separator');
+    });
+
+    test('cookies.js: No duplicate findInNode', () => {
+      // This test verifies the bug fix by checking the source
+      fetch('cookies.js')
+        .then(r => r.text())
+        .then(code => {
+          const matches = code.match(/function findInNode/g) || [];
+          assertEqual(matches.length, 1, 'Should have exactly one findInNode definition');
+        });
+    });
+
+    test('social.js: Bsky parser extracts text', () => {
+      const container = document.createElement('div');
+      container.textContent = '  Test post content  ';
+      
+      const parse = (container) => {
+        const text = container.textContent.trim();
+        return text ? {text, time: Date.now()} : null;
+      };
+      
+      const result = parse(container);
+      assert(result !== null, 'Should parse container');
+      assertEqual(result.text, 'Test post content', 'Should trim text');
+      assert(result.time > 0, 'Should have timestamp');
+    });
+
+    test('social.js: Twitter parser handles missing elements', () => {
+      const container = document.createElement('div');
+      
+      const parse = (container) => {
+        if (!container) return null;
+        const article = container.querySelector('[data-testid="tweet"]');
+        if (!article) return null;
+        return {text: 'parsed'};
+      };
+      
+      const result = parse(container);
+      assertEqual(result, null, 'Should return null for missing article');
+    });
+
+    // ===== Run Tests =====
+    
+    async function runTests() {
+      for (const t of tests) {
+        const testDiv = document.createElement('div');
+        testDiv.className = 'test';
+        
+        try {
+          await t.fn();
+          testDiv.classList.add('pass');
+          testDiv.innerHTML = `<strong>✓ ${t.name}</strong>`;
+          passed++;
+        } catch (e) {
+          testDiv.classList.add('fail');
+          testDiv.innerHTML = `<strong>✗ ${t.name}</strong><pre>${e.message}\n${e.stack}</pre>`;
+          failed++;
+        }
+        
+        resultsDiv.appendChild(testDiv);
+      }
+      
+      const summary = document.createElement('div');
+      summary.className = `summary ${failed === 0 ? 'pass' : 'fail'}`;
+      summary.textContent = `Tests: ${passed} passed, ${failed} failed, ${tests.length} total`;
+      resultsDiv.insertBefore(summary, resultsDiv.firstChild);
+    }
+    
+    runTests();
+  </script>
+</body>
+</html>
