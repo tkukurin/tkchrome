@@ -125,13 +125,8 @@
       "run_at": "document_idle"
     },
     {
-      "matches": [ "https://www.facebook.com/*" ],
-      "js": ["content/hide.js"],
-      "run_at": "document_idle"
-    },
-    {
       "matches": ["<all_urls>"],
-      "js": ["content/filter.js"],
+      "js": ["content/hide.js"],
       "run_at": "document_idle"
     },
     {

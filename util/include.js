@@ -187,6 +187,38 @@ Util.sidebar = content => {
   return side;
 };
 
+Util.panel = (id, title) => {
+  const existing = document.getElementById(id);
+  if (existing) {
+    existing.style.display = existing.style.display === 'none' ? '' : 'none';
+    return existing.querySelector('.__util_panel_body');
+  }
+
+  const panel = Util.newEl('div', {className: '__util_panel', id: id});
+
+  const header = Util.newEl('div', {className: '__util_panel_hd'});
+  header.appendChild(Util.newEl('span', {textContent: title}));
+  const closeBtn = Util.newEl('button', {
+    className: '__util_panel_close',
+    textContent: '\u00d7',
+    onclick: () => panel.style.display = 'none'
+  });
+  header.appendChild(closeBtn);
+  panel.appendChild(header);
+
+  const body = Util.newEl('div', {className: '__util_panel_body'});
+  panel.appendChild(body);
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && panel.style.display !== 'none') {
+      panel.style.display = 'none';
+    }
+  });
+
+  document.body.appendChild(panel);
+  return body;
+};
+
 Util.observe = (f, el=document.body, opts={childList:true, subtree:true}) => {
   const observer = new MutationObserver(f);
   observer.observe(el, opts);

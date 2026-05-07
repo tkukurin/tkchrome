@@ -1,38 +1,302 @@
-// Just remove selectors.
-// Useful for junk parts of websites.
-let baseSites = [
-    'www.facebook.com',
-];
-let fullSites = []
+/**
+ * Content Filter - Hide elements on any website using CSS selector + regex.
+ *
+ * USAGE:
+ *   Alt+H  - Open filter UI (add/remove rules, pick elements)
+ *
+ * Rules are stored per-hostname in chrome.storage.local.
+ * Each rule: { selector: "CSS selector", regex: "pattern", flags: "gi" }
+ *
+ * Example: Hide YouTube recommendations on the home page:
+ *   selector: ytd-rich-item-renderer
+ *   regex:    .* (match all)
+ *
+ * Example: Hide specific YouTube recommendations by title:
+ *   selector: ytd-rich-item-renderer
+ *   regex:    shorts|react|minecraft
+ */
 
-let rmAll = (loc) => fullSites.indexOf(loc.hostname) >= 0;
-let rmNow = (loc) => loc.pathname == '/' || rmAll(loc);
+const FILTER_STORAGE_KEY = 'contentFilterRules';
 
-if (rmAll(window.location)) {
-    const style = document.createElement('style');
-    style.textContent = 'div[role="main"] { display: none !important; }';
-    document.head.appendChild(style);
-}
+const ContentFilter = {
+  rules: [],   // rules for current hostname
+  hidden: [],  // currently hidden elements
+  observer: null,
 
-let doRm = (w) => document.querySelectorAll('div[role="main"]').forEach(element => {
-    if (rmNow(w.location)) element.remove();
-});
+  async loadRules() {
+    try {
+      const data = await chrome.storage.local.get(FILTER_STORAGE_KEY);
+      const allRules = data[FILTER_STORAGE_KEY] || {};
+      this.rules = allRules[location.hostname] || [];
+    } catch (e) {
+      console.warn('[filter] storage unavailable', e);
+      this.rules = [];
+    }
+  },
 
-doRm(window)
+  async saveRules() {
+    try {
+      const data = await chrome.storage.local.get(FILTER_STORAGE_KEY);
+      const allRules = data[FILTER_STORAGE_KEY] || {};
+      allRules[location.hostname] = this.rules;
+      await chrome.storage.local.set({ [FILTER_STORAGE_KEY]: allRules });
+    } catch (e) {
+      console.warn('[filter] failed to save', e);
+    }
+  },
 
-// Create a Mutation Observer to watch for new elements with role="main"
-const observer = new MutationObserver((mutationsList, observer) => {
-    doRm(window)
-    /*
-    for (const mutation of mutationsList) {
-        if (mutation.type === 'childList') {
-            mutation.addedNodes.forEach(node => {
-                if (node.nodeType === 1 && node.matches('div[role="main"]')) {
-                    node.remove();
-                }
-            });
+  apply() {
+    for (const el of this.hidden) {
+      el.style.removeProperty('display');
+      el.removeAttribute('data-tk-filtered');
+    }
+    this.hidden = [];
+
+    for (const rule of this.rules) {
+      try {
+        const re = new RegExp(rule.regex, rule.flags || 'i');
+        const els = document.querySelectorAll(rule.selector);
+        for (const el of els) {
+          if (el.getAttribute('data-tk-filtered')) continue;
+          if (re.test(el.textContent || '')) {
+            el.style.display = 'none';
+            el.setAttribute('data-tk-filtered', '1');
+            this.hidden.push(el);
+          }
         }
-    }*/
+      } catch (e) {
+        console.warn('[filter] bad rule', rule, e);
+      }
+    }
+  },
+
+  startObserver() {
+    if (this.observer) return;
+    let timeout = null;
+    this.observer = new MutationObserver(() => {
+      if (timeout) clearTimeout(timeout);
+      timeout = setTimeout(() => this.apply(), 300);
+    });
+    this.observer.observe(document.documentElement, { childList: true, subtree: true });
+  },
+
+  async init() {
+    await this.loadRules();
+    if (this.rules.length > 0) {
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => {
+          this.apply();
+          this.startObserver();
+        });
+      } else {
+        this.apply();
+        this.startObserver();
+      }
+    }
+  }
+};
+
+// --- UI ---
+
+const FilterUI = {
+  body: null,
+  picking: false,
+  pickHighlight: null,
+
+  create() {
+    const body = Util.panel('__tk_filter', `Content Filter (${location.hostname})`);
+    this.body = body;
+
+    // Only build contents on first creation
+    if (!body.querySelector('#__tk_f_sel')) {
+      body.innerHTML = `
+        <div class="__tk_f_hint">Pick an element or type a CSS selector + regex to hide matching content.</div>
+        <div class="__tk_f_row">
+          <input type="text" id="__tk_f_sel" placeholder="CSS selector (e.g. ytd-rich-item-renderer)">
+          <button id="__tk_f_pick" title="Click an element on the page">\u22b9 Pick</button>
+        </div>
+        <div class="__tk_f_row">
+          <input type="text" id="__tk_f_re" placeholder="Regex pattern (e.g. shorts|react)">
+          <input type="text" id="__tk_f_flags" placeholder="flags" style="width:50px;flex:none" value="i">
+        </div>
+        <div class="__tk_f_row">
+          <button id="__tk_f_test">Test</button>
+          <button id="__tk_f_add">+ Add Rule</button>
+          <span id="__tk_f_testcount" class="__tk_f_count"></span>
+        </div>
+        <div id="__tk_f_rules"></div>
+      `;
+
+      body.querySelector('#__tk_f_pick').addEventListener('click', () => this.startPick());
+      body.querySelector('#__tk_f_add').addEventListener('click', () => this.addRule());
+      body.querySelector('#__tk_f_test').addEventListener('click', () => this.testRule());
+    }
+
+    this.refresh();
+  },
+
+  refresh() {
+    const container = this.body.querySelector('#__tk_f_rules');
+    container.innerHTML = '';
+    for (let i = 0; i < ContentFilter.rules.length; i++) {
+      const rule = ContentFilter.rules[i];
+      const div = document.createElement('div');
+      div.className = '__tk_f_rule';
+      const info = document.createElement('div');
+      info.className = '__tk_f_rule_info';
+      const selSpan = document.createElement('div');
+      selSpan.className = '__tk_f_rule_sel';
+      selSpan.textContent = rule.selector;
+      const reSpan = document.createElement('div');
+      reSpan.className = '__tk_f_rule_re';
+      reSpan.textContent = `/${rule.regex}/${rule.flags || 'i'}`;
+      info.appendChild(selSpan);
+      info.appendChild(reSpan);
+      div.appendChild(info);
+
+      const rmBtn = document.createElement('button');
+      rmBtn.className = '__tk_f_danger';
+      rmBtn.textContent = '\u2715';
+      rmBtn.title = 'Remove rule';
+      rmBtn.addEventListener('click', () => this.removeRule(i));
+      div.appendChild(rmBtn);
+      container.appendChild(div);
+    }
+  },
+
+  async addRule() {
+    const sel = this.body.querySelector('#__tk_f_sel').value.trim();
+    const re = this.body.querySelector('#__tk_f_re').value.trim();
+    const flags = this.body.querySelector('#__tk_f_flags').value.trim() || 'i';
+    if (!sel || !re) { Util.toast('Need both selector and regex'); return; }
+    try { new RegExp(re, flags); } catch (e) { Util.toast('Invalid regex: ' + e.message); return; }
+    try { document.querySelectorAll(sel); } catch (e) { Util.toast('Invalid selector: ' + e.message); return; }
+
+    ContentFilter.rules.push({ selector: sel, regex: re, flags });
+    await ContentFilter.saveRules();
+    ContentFilter.apply();
+    ContentFilter.startObserver();
+    this.refresh();
+    Util.toast(`Rule added \u2014 hiding ${ContentFilter.hidden.length} elements`);
+  },
+
+  async removeRule(index) {
+    ContentFilter.rules.splice(index, 1);
+    await ContentFilter.saveRules();
+    ContentFilter.apply();
+    this.refresh();
+    Util.toast('Rule removed');
+  },
+
+  testRule() {
+    const sel = this.body.querySelector('#__tk_f_sel').value.trim();
+    const re = this.body.querySelector('#__tk_f_re').value.trim();
+    const flags = this.body.querySelector('#__tk_f_flags').value.trim() || 'i';
+    const countEl = this.body.querySelector('#__tk_f_testcount');
+
+    if (!sel || !re) { countEl.textContent = ''; return; }
+    try {
+      const regex = new RegExp(re, flags);
+      const els = document.querySelectorAll(sel);
+      let count = 0;
+      for (const el of els) { if (regex.test(el.textContent || '')) count++; }
+      countEl.textContent = `${count}/${els.length} elements match`;
+      countEl.style.color = count > 0 ? '#6f6' : '#f66';
+    } catch (e) {
+      countEl.textContent = 'Error: ' + e.message;
+      countEl.style.color = '#f66';
+    }
+  },
+
+  startPick() {
+    this.picking = true;
+    const panel = this.body.closest('.__util_panel');
+    panel.style.pointerEvents = 'none';
+    panel.style.opacity = '0.5';
+    document.addEventListener('mouseover', this._onHover);
+    document.addEventListener('click', this._onClick, true);
+    document.addEventListener('keydown', this._onPickEsc);
+    Util.toast('Click an element to select it (Esc to cancel)');
+  },
+
+  stopPick() {
+    this.picking = false;
+    const panel = this.body && this.body.closest('.__util_panel');
+    if (panel) { panel.style.pointerEvents = ''; panel.style.opacity = ''; }
+    document.removeEventListener('mouseover', this._onHover);
+    document.removeEventListener('click', this._onClick, true);
+    document.removeEventListener('keydown', this._onPickEsc);
+    if (this.pickHighlight) {
+      this.pickHighlight.classList.remove('__tk_f_highlight');
+      this.pickHighlight = null;
+    }
+  },
+
+  _onHover: (function(e) {
+    if (FilterUI.pickHighlight) FilterUI.pickHighlight.classList.remove('__tk_f_highlight');
+    const el = e.target;
+    if (el.closest('.__util_panel')) return;
+    el.classList.add('__tk_f_highlight');
+    FilterUI.pickHighlight = el;
+  }),
+
+  _onClick: (function(e) {
+    if (!FilterUI.picking) return;
+    const el = e.target;
+    if (el.closest('.__util_panel')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    FilterUI.body.querySelector('#__tk_f_sel').value = FilterUI.buildSelector(el);
+    FilterUI.stopPick();
+  }),
+
+  _onPickEsc: (function(e) {
+    if (e.key === 'Escape') FilterUI.stopPick();
+  }),
+
+  buildSelector(el) {
+    if (el.id) return `#${CSS.escape(el.id)}`;
+    const tag = el.tagName.toLowerCase();
+
+    if (tag.includes('-')) {
+      const parent = el.parentElement;
+      if (parent && parent.id) return `#${CSS.escape(parent.id)} > ${tag}`;
+      return tag;
+    }
+
+    if (el.classList.length > 0) {
+      const classes = Array.from(el.classList)
+        .filter(c => !c.startsWith('__tk') && !c.startsWith('__util'))
+        .map(c => '.' + CSS.escape(c)).join('');
+      if (classes) {
+        const selector = tag + classes;
+        if (document.querySelectorAll(selector).length <= 20) return selector;
+      }
+    }
+
+    const parts = [];
+    let current = el;
+    for (let i = 0; i < 3 && current && current !== document.body; i++) {
+      const ctag = current.tagName.toLowerCase();
+      if (current.id) { parts.unshift(`#${CSS.escape(current.id)}`); break; }
+      const cls = Array.from(current.classList)
+        .filter(c => !c.startsWith('__tk') && !c.startsWith('__util'))
+        .slice(0, 2).map(c => '.' + CSS.escape(c)).join('');
+      parts.unshift(ctag + cls);
+      current = current.parentElement;
+    }
+    return parts.join(' > ');
+  }
+};
+
+// --- Keyboard shortcut: Alt+H ---
+document.addEventListener('keydown', e => {
+  if (e.altKey && e.code === 'KeyH' && !Util.isInput(e.target)) {
+    e.preventDefault();
+    FilterUI.create();
+  }
 });
 
-observer.observe(document.body, { childList: true, subtree: true });
+// --- Auto-apply on load ---
+ContentFilter.init();
