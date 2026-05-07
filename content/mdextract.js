@@ -146,59 +146,51 @@ const inspectAndSelect = () => new Promise(resolve => {
 
 // --- Settings Modal UI ---
 const showSettings = () => {
-  if (document.getElementById('extr-settings')) return;
+  const body = Util.panel('extr-settings', 'Extr Settings');
+  const panel = body.closest('.__util_panel');
+  // Center the settings panel
+  Object.assign(panel.style, { top: '50%', left: '50%', right: 'auto', transform: 'translate(-50%, -50%)' });
 
-  const modal = document.createElement('div');
-  modal.id = 'extr-settings';
-  Object.assign(modal.style, {
-    position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
-    background: '#1e1e1e', color: '#e0e0e0', padding: '20px', borderRadius: '8px',
-    zIndex: 999999, border: '1px solid #333', width: '500px', fontFamily: 'monospace',
-    boxShadow: '0 10px 30px rgba(0,0,0,0.5)'
-  });
+  // Only build contents on first open
+  if (!body.querySelector('#extr-cfg-junk')) {
+    const bml = `javascript:void(location.href='https://defuddle.md/'+location.href.replace(/%5Ehttps?:%5C/%5C//,%27%27))`;
 
-  const bml = `javascript:void(location.href='https://defuddle.md/'+location.href.replace(/%5Ehttps?:%5C/%5C//,%27%27))`;
+    body.innerHTML = `
+      <label style="display:block;margin-bottom:5px;font-size:12px;">Junk Selectors (Comma separated):</label>
+      <textarea id="extr-cfg-junk" style="width:100%;height:60px;background:#111;color:#fff;border:1px solid #444;margin-bottom:15px;padding:5px;font-family:monospace;">${window.ExtrConfig.junk}</textarea>
+      
+      <label style="display:block;margin-bottom:5px;font-size:12px;">Router Configuration (JSON):</label>
+      <textarea id="extr-cfg-router" style="width:100%;height:100px;background:#111;color:#fff;border:1px solid #444;margin-bottom:15px;padding:5px;font-family:monospace;">${JSON.stringify(window.ExtrConfig.router, null, 2)}</textarea>
+      
+      <div style="background:#2a2a2a;padding:10px;border-radius:4px;margin-bottom:15px;">
+        <span style="font-size:11px;color:#aaa;">Fallback Bookmarklet (Drag to Bookmarks bar):</span><br/>
+        <a href="${bml}" style="color:#00d8ff;text-decoration:none;font-size:13px;font-weight:bold;">Defuddle.md</a>
+      </div>
 
-  modal.innerHTML = `
-    <h2 style="margin:0 0 15px;color:#00d8ff;font-size:16px;">Extr Settings</h2>
-    
-    <label style="display:block;margin-bottom:5px;font-size:12px;">Junk Selectors (Comma separated):</label>
-    <textarea id="extr-cfg-junk" style="width:100%;height:60px;background:#111;color:#fff;border:1px solid #444;margin-bottom:15px;padding:5px;font-family:inherit;">${window.ExtrConfig.junk}</textarea>
-    
-    <label style="display:block;margin-bottom:5px;font-size:12px;">Router Configuration (JSON):</label>
-    <textarea id="extr-cfg-router" style="width:100%;height:100px;background:#111;color:#fff;border:1px solid #444;margin-bottom:15px;padding:5px;font-family:inherit;">${JSON.stringify(window.ExtrConfig.router, null, 2)}</textarea>
-    
-    <div style="background:#2a2a2a;padding:10px;border-radius:4px;margin-bottom:15px;">
-      <span style="font-size:11px;color:#aaa;">Fallback Bookmarklet (Drag to Bookmarks bar):</span><br/>
-      <a href="${bml}" style="color:#00d8ff;text-decoration:none;font-size:13px;font-weight:bold;">Defuddle.md</a>
-    </div>
+      <div style="display:flex;justify-content:flex-end;gap:10px;">
+        <button id="extr-cfg-cancel">Cancel</button>
+        <button id="extr-cfg-save" style="background:#00d8ff;color:#000;font-weight:bold;">Save</button>
+      </div>
+    `;
 
-    <div style="display:flex;justify-content:flex-end;gap:10px;">
-      <button id="extr-cfg-cancel" style="background:#333;color:#fff;border:none;padding:6px 12px;cursor:pointer;border-radius:4px;">Cancel</button>
-      <button id="extr-cfg-save" style="background:#00d8ff;color:#000;border:none;padding:6px 12px;cursor:pointer;border-radius:4px;font-weight:bold;">Save</button>
-    </div>
-  `;
-
-  document.body.appendChild(modal);
-
-  const close = () => { modal.remove(); document.removeEventListener('keydown', onEsc); };
-  const onEsc = (e) => { if (e.key === 'Escape') close(); };
-  
-  document.getElementById('extr-cfg-cancel').onclick = close;
-  document.getElementById('extr-cfg-save').onclick = () => {
-    try {
-      const parsedRouter = JSON.parse(document.getElementById('extr-cfg-router').value);
-      saveConfig({
-        junk: document.getElementById('extr-cfg-junk').value.trim(),
-        router: parsedRouter
-      });
-      close();
-    } catch (e) {
-      Util.toast('Invalid JSON in Router config!');
-    }
-  };
-  
-  document.addEventListener('keydown', onEsc);
+    body.querySelector('#extr-cfg-cancel').onclick = () => panel.style.display = 'none';
+    body.querySelector('#extr-cfg-save').onclick = () => {
+      try {
+        const parsedRouter = JSON.parse(body.querySelector('#extr-cfg-router').value);
+        saveConfig({
+          junk: body.querySelector('#extr-cfg-junk').value.trim(),
+          router: parsedRouter
+        });
+        panel.style.display = 'none';
+      } catch (e) {
+        Util.toast('Invalid JSON in Router config!');
+      }
+    };
+  } else {
+    // Refresh textarea values on re-open
+    body.querySelector('#extr-cfg-junk').value = window.ExtrConfig.junk;
+    body.querySelector('#extr-cfg-router').value = JSON.stringify(window.ExtrConfig.router, null, 2);
+  }
 };
 
 // --- SPA Routing ---

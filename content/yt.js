@@ -69,7 +69,28 @@ const AdSkipManager = {
       timestamp: new Date().toISOString(),
       url: window.location.href
     };
-    localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(cache));
+    // Evict oldest entries if cache is too large (keep last 50)
+    const MAX_ENTRIES = 50;
+    const keys = Object.keys(cache);
+    if (keys.length > MAX_ENTRIES) {
+      keys.sort((a, b) => (cache[a].timestamp || '').localeCompare(cache[b].timestamp || ''));
+      for (let i = 0; i < keys.length - MAX_ENTRIES; i++) delete cache[keys[i]];
+    }
+    try {
+      localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(cache));
+    } catch (e) {
+      // Quota exceeded — aggressively evict half and retry
+      const remaining = Object.keys(cache);
+      remaining.sort((a, b) => (cache[a].timestamp || '').localeCompare(cache[b].timestamp || ''));
+      const half = Math.floor(remaining.length / 2);
+      for (let i = 0; i < half; i++) delete cache[remaining[i]];
+      try {
+        localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(cache));
+      } catch (e2) {
+        console.warn('[YT-AdSkip] localStorage quota exceeded, clearing cache', e2);
+        localStorage.removeItem(CACHE_STORAGE_KEY);
+      }
+    }
     console.log('[YT-AdSkip] Cached data for', videoId);
   },
 
@@ -139,125 +160,58 @@ const SkipPanel = {
     if (this.panel) return this.panel;
     if (!document.body) return null; // Not ready yet
 
-    const panel = document.createElement('div');
-    panel.id = 'yt-adskip-panel';
-    panel.innerHTML = `
-      <div class="adskip-header">
-        <span class="adskip-title">⏭️ Ad Skip</span>
-        <div class="adskip-controls">
-          <button class="adskip-btn adskip-add" title="Add skip">+</button>
-          <button class="adskip-btn adskip-minimize">_</button>
-          <button class="adskip-btn adskip-close">✕</button>
-        </div>
-      </div>
-      <div class="adskip-body">
-        <table class="adskip-table">
-          <thead><tr><th>Start</th><th>End</th><th>Reason</th><th></th></tr></thead>
-          <tbody></tbody>
-        </table>
-        <div class="adskip-footer">
-          <button class="adskip-btn adskip-reanalyze">🔄 Re-analyze</button>
-          <button class="adskip-btn adskip-clear">🗑️ Clear</button>
-        </div>
+    const body = Util.panel('yt-adskip-panel', '⏭️ Ad Skip');
+    const panel = body.closest('.__util_panel');
+    this.panel = panel;
+
+    // Reposition to bottom-right
+    Object.assign(panel.style, { top: 'auto', bottom: '20px', maxHeight: '300px', width: '400px' });
+
+    // Replace close button behavior and add minimize/add controls to header
+    const header = panel.querySelector('.__util_panel_hd');
+    header.style.cursor = 'move';
+    header.innerHTML = `
+      <span class="adskip-title">⏭️ Ad Skip</span>
+      <div style="display:flex;gap:4px">
+        <button class="adskip-add" title="Add skip">+</button>
+        <button class="adskip-minimize">_</button>
+        <button class="adskip-reanalyze" title="Re-analyze">🔄</button>
+        <button class="adskip-clear" title="Clear">🗑️</button>
+        <button class="adskip-close">✕</button>
       </div>
     `;
 
+    body.innerHTML = `
+      <table class="adskip-table">
+        <thead><tr><th>Start</th><th>End</th><th>Reason</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    `;
+
+    // SkipPanel-specific styles (table, minimize)
     const style = document.createElement('style');
     style.textContent = `
-      #yt-adskip-panel {
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        width: 400px;
-        max-height: 300px;
-        background: #1a1a1a;
-        border: 1px solid #333;
-        border-radius: 8px;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        font-size: 13px;
-        color: #e0e0e0;
-        z-index: 99999;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-        overflow: hidden;
-      }
-      #yt-adskip-panel.minimized .adskip-body { display: none; }
-      #yt-adskip-panel.minimized { max-height: none; }
-      .adskip-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 8px 12px;
-        background: #252525;
-        cursor: move;
-        user-select: none;
-        border-bottom: 1px solid #333;
-      }
-      .adskip-title { font-weight: 600; }
-      .adskip-controls { display: flex; gap: 4px; }
-      .adskip-btn {
-        background: #333;
-        border: none;
-        color: #e0e0e0;
-        padding: 4px 8px;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 12px;
-      }
-      .adskip-btn:hover { background: #444; }
-      .adskip-body {
-        max-height: 240px;
-        overflow-y: auto;
-        padding: 8px;
-      }
-      .adskip-table {
-        width: 100%;
-        border-collapse: collapse;
-      }
+      #yt-adskip-panel.minimized .__util_panel_body { display: none; }
+      .adskip-table { width: 100%; border-collapse: collapse; }
       .adskip-table th, .adskip-table td {
-        padding: 6px 8px;
-        text-align: left;
-        border-bottom: 1px solid #333;
+        padding: 6px 8px; text-align: left; border-bottom: 1px solid #333;
       }
-      .adskip-table th {
-        background: #252525;
-        font-weight: 600;
-        position: sticky;
-        top: 0;
-      }
+      .adskip-table th { background: #252525; font-weight: 600; position: sticky; top: 0; }
       .adskip-table tr:hover { background: #252525; }
-      .adskip-table .skip-btn, .adskip-table .rm-btn {
-        padding: 2px 6px;
-        font-size: 11px;
-      }
       .adskip-table .skip-btn { background: #3a6a9a; }
       .adskip-table .skip-btn:hover { background: #4a7aaa; }
       .adskip-table .rm-btn { background: #8a3a3a; }
       .adskip-table .rm-btn:hover { background: #a54545; }
-      .adskip-add { font-weight: bold; }
-      .adskip-footer {
-        display: flex;
-        gap: 8px;
-        padding: 8px 0 4px;
-        border-top: 1px solid #333;
-        margin-top: 8px;
-      }
-      .adskip-empty {
-        text-align: center;
-        padding: 20px;
-        color: #888;
-      }
+      .adskip-empty { text-align: center; padding: 20px; color: #888; }
     `;
-
     document.head.appendChild(style);
-    document.body.appendChild(panel);
-    this.panel = panel;
 
     // Event listeners
-    panel.querySelector('.adskip-close').onclick = () => this.hide();
-    panel.querySelector('.adskip-minimize').onclick = () => panel.classList.toggle('minimized');
-    panel.querySelector('.adskip-reanalyze').onclick = () => ytAdSkipCache.reanalyze();
-    panel.querySelector('.adskip-add').onclick = () => this.promptAdd();
-    panel.querySelector('.adskip-clear').onclick = () => {
+    header.querySelector('.adskip-close').onclick = () => this.hide();
+    header.querySelector('.adskip-minimize').onclick = () => panel.classList.toggle('minimized');
+    header.querySelector('.adskip-reanalyze').onclick = () => ytAdSkipCache.reanalyze();
+    header.querySelector('.adskip-add').onclick = () => this.promptAdd();
+    header.querySelector('.adskip-clear').onclick = () => {
       const videoId = getVideoId();
       if (videoId) {
         ytAdSkipCache.clear(videoId);
@@ -272,9 +226,8 @@ const SkipPanel = {
 
     return panel;
   },
-
   makeDraggable(panel) {
-    const header = panel.querySelector('.adskip-header');
+    const header = panel.querySelector('.__util_panel_hd');
     let isDragging = false, offsetX, offsetY;
 
     header.onmousedown = (e) => {
