@@ -131,6 +131,11 @@
     },
     {
       "matches": ["<all_urls>"],
+      "js": ["content/filter.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["<all_urls>"],
       "js": ["content/cookies.js"]
     }
   ]

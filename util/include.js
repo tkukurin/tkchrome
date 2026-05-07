@@ -1,4 +1,6 @@
 /** Stuff that seems relatively generic. */
+if (!window.__tkIncludeLoaded) {
+window.__tkIncludeLoaded = true;
 
 // Not the best idea but whatevs, monkey patching
 NodeList.prototype.forEach = Array.prototype.forEach;
@@ -298,3 +300,14 @@ if (window.__test) {
     SortedUniqueArray
   };
 }
+
+// Export to window so other content scripts can access them
+window.F = F;
+window.Q = Q;
+window.Util = Util;
+window.Shortcut = Shortcut;
+window.Retry = Retry;
+window.SortedArray = SortedArray;
+window.SortedUniqueArray = SortedUniqueArray;
+
+} // end include guard
